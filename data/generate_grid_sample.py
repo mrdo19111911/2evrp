@@ -4,7 +4,7 @@ import json
 
 # === Config ===
 GRID_W, GRID_H = 20, 20
-CELL_SIZE_KM = 5.0
+CELL_SIZE_KM = 2.0
 DAY_LENGTH = 480.0
 TRUCK_SPEED = 25.0
 BIKE_SPEED = 20.0

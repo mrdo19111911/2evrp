@@ -2,7 +2,7 @@
 import numpy as np
 
 from ..data.constants import ACT_DELIVER, ACT_RELOAD, COL_DEMAND
-from ..data.cost import TRUCK_SPEED_URBAN, DAY_LENGTH
+from ..data.cost import TRUCK_SPEED_URBAN, DAY_LENGTH, RELOAD_SERVICE_TIME
 from .constraints import calc_service_time, check_trip_feasibility
 
 
@@ -165,3 +165,172 @@ def split_to_trips(giant_tour, customers, dist_matrix, capacity, speed=None):
             i += 1
 
     return trips
+
+
+def _split_gt_segments(giant_tour):
+    """Split GT into segments: each segment = [reload, deliver, deliver, ...].
+    First segment may start without reload (from depot).
+    Returns list of (reload_node_or_None, [deliver_stops])."""
+    segments = []
+    current_reload = None
+    current_delivers = []
+
+    for stop in giant_tour:
+        if stop["type"] == "reload":
+            if current_delivers:
+                segments.append((current_reload, current_delivers))
+                current_delivers = []
+            current_reload = stop
+        else:
+            current_delivers.append(stop)
+
+    if current_delivers:
+        segments.append((current_reload, current_delivers))
+    return segments
+
+
+def _assign_to_best_bike(stop, bike_assigned, bike_clocks, bike_prev_dm,
+                         sat_node, capacity, dist_matrix, speed, available):
+    """Find best bike for a deliver stop. Returns bike index or -1."""
+    node = stop["node"]
+    demand = stop["demand"]
+    best_b = -1
+    best_score = np.inf
+    for b in available:
+        cur_load = sum(d["demand"] for d in bike_assigned[b])
+        if cur_load + demand > capacity:
+            continue
+        prev = sat_node + 1 if sat_node is not None else bike_prev_dm[b]
+        if bike_assigned[b]:
+            prev = bike_assigned[b][-1]["node"] + 1
+        travel = dist_matrix[prev, node + 1] / speed * 60.0
+        score = bike_clocks[b] + travel + len(bike_assigned[b]) * 1.0
+        if score < best_score:
+            best_score = score
+            best_b = b
+    return best_b
+
+
+def split_bike_gt(giant_tour, customers, dist_matrix, capacity, speed, n_bikes):
+    """Multi-trip bike split with regional assignment + multi-pass easy/hard.
+
+    GT = [R0, D,D,D, R1, D,D,D, R2, D,D,D, ...]
+    Each segment between reloads is split across bikes by capacity.
+    Each bike: depot → delivers → SAT → delivers → SAT → ... → depot.
+    """
+    n = len(giant_tour)
+    if n == 0:
+        return []
+
+    from ..data.constants import COL_TW_OPEN, COL_TW_CLOSE
+
+    segments = _split_gt_segments(giant_tour)
+    if not segments:
+        return []
+
+    all_bikes = list(range(n_bikes))
+
+    # Initialize bike states
+    bike_stops = [[] for _ in range(n_bikes)]
+    bike_actions = [[] for _ in range(n_bikes)]
+    bike_clocks = [0.0] * n_bikes
+    bike_prev_dm = [0] * n_bikes  # all start at depot
+    bike_loads = [0.0] * n_bikes
+
+    for seg_idx, (reload_stop, delivers) in enumerate(segments):
+        sat_node = reload_stop["node"] if reload_stop is not None else None
+        available = all_bikes
+
+        # Multi-pass: classify easy vs hard customers
+        easy, hard = [], []
+        for stop in delivers:
+            node = stop["node"]
+            tw_width = float(customers[node, COL_TW_CLOSE]) - float(customers[node, COL_TW_OPEN])
+            if tw_width >= 60.0:
+                easy.append(stop)
+            else:
+                hard.append(stop)
+
+        bike_assigned = [[] for _ in range(n_bikes)]
+
+        # Pass 1: assign easy customers (wide TW, flexible)
+        for stop in easy:
+            best_b = _assign_to_best_bike(
+                stop, bike_assigned, bike_clocks, bike_prev_dm,
+                sat_node, capacity, dist_matrix, speed, available)
+            if best_b >= 0:
+                bike_assigned[best_b].append(stop)
+
+        # Pass 2: assign hard customers (tight TW) — prefer bike with most remaining time
+        for stop in sorted(hard, key=lambda s: customers[s["node"], COL_TW_CLOSE]):
+            best_b = _assign_to_best_bike(
+                stop, bike_assigned, bike_clocks, bike_prev_dm,
+                sat_node, capacity, dist_matrix, speed, available)
+            if best_b >= 0:
+                bike_assigned[best_b].append(stop)
+
+        # Now send each bike that has work to satellite + deliver
+        for b in range(n_bikes):
+            if not bike_assigned[b]:
+                continue
+
+            # Simulate reload + delivers first, only commit if ≥1 deliver succeeds
+            sim_clock = bike_clocks[b]
+            sim_prev = bike_prev_dm[b]
+
+            if sat_node is not None:
+                travel = dist_matrix[sim_prev, sat_node + 1] / speed * 60.0
+                sim_clock += travel + RELOAD_SERVICE_TIME
+                sim_prev = sat_node + 1
+
+            # Check which delivers are feasible after reload
+            feasible = []
+            fc, fp = sim_clock, sim_prev
+            for stop in bike_assigned[b]:
+                node = stop["node"]
+                demand = stop["demand"]
+                travel = dist_matrix[fp, node + 1] / speed * 60.0
+                arrive = fc + travel
+                tw_open = float(customers[node, COL_TW_OPEN])
+                if arrive < tw_open:
+                    arrive = tw_open
+                service = calc_service_time(demand)
+                depot_return = dist_matrix[node + 1, 0] / speed * 60.0
+                if arrive + service + depot_return > DAY_LENGTH:
+                    break
+                feasible.append((stop, arrive + service, node + 1))
+                fc = arrive + service
+                fp = node + 1
+
+            if not feasible:
+                continue  # no delivers feasible → don't reload, don't waste time
+
+            # Commit: reload + delivers
+            if sat_node is not None:
+                bike_stops[b].append(sat_node)
+                bike_actions[b].append(ACT_RELOAD)
+                bike_clocks[b] = sim_clock
+                bike_prev_dm[b] = sat_node + 1
+                bike_loads[b] = 0.0
+
+            for stop, end_clock, end_dm in feasible:
+                bike_stops[b].append(stop["node"])
+                bike_actions[b].append(ACT_DELIVER)
+                bike_clocks[b] = end_clock
+                bike_prev_dm[b] = end_dm
+                bike_loads[b] += stop["demand"]
+
+    # Pack routes
+    routes = []
+    for b in range(n_bikes):
+        if not bike_stops[b]:
+            continue
+        routes.append({
+            "stops": np.array(bike_stops[b], dtype=np.int32),
+            "actions": np.array(bike_actions[b], dtype=np.int8),
+            "total_demand": 0.0,
+            "total_distance": _compute_route_distance(
+                {"stops": np.array(bike_stops[b], dtype=np.int32)}, dist_matrix),
+            "bike_id": b,
+        })
+    return routes

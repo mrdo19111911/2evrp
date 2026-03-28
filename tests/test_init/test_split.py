@@ -61,7 +61,7 @@ class TestSplitLowDemand:
 
         routes = split_to_trips(
             giant_tour, customers, dm,
-            truck_capacity=2000.0,
+            capacity=2000.0,
         )
         assert len(routes) == 1
         assert routes[0]["total_demand"] == pytest.approx(100.0)
@@ -100,7 +100,7 @@ class TestSplitHighDemand:
 
         routes = split_to_trips(
             giant_tour, customers, dm,
-            truck_capacity=100.0,
+            capacity=100.0,
         )
         assert len(routes) >= 3
 
@@ -129,7 +129,7 @@ class TestSplitHighDemand:
 
         routes = split_to_trips(
             giant_tour, customers, dm,
-            truck_capacity=100.0,
+            capacity=100.0,
         )
         for i, r in enumerate(routes):
             assert r["total_demand"] <= 100.0 + 1e-9, (
@@ -156,7 +156,7 @@ class TestSplitHighDemand:
 
         routes = split_to_trips(
             giant_tour, customers, dm,
-            truck_capacity=2000.0,
+            capacity=2000.0,
         )
         all_nodes = set()
         for r in routes:
@@ -179,7 +179,7 @@ class TestSplitHighDemand:
 
         routes = split_to_trips(
             giant_tour, customers, dm,
-            truck_capacity=2000.0,
+            capacity=2000.0,
         )
         assert len(routes) == 1
         r = routes[0]

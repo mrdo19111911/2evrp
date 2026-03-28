@@ -3,7 +3,7 @@ import numpy as np
 from ..data.cost import TRUCK_CAPACITY, BIKE_CAPACITY, DAY_LENGTH, BIKE_SPEED_URBAN
 from .clustering import cluster_customers, rebalance_clusters
 from .giant_tour import build_giant_tour, build_bike_giant_tour
-from .split import split_to_trips, group_trips_to_trucks
+from .split import split_to_trips, group_trips_to_trucks, split_bike_gt
 from .truck_insertion import (insert_bike_customers_into_trips,
                               build_new_trips_from_remaining,
                               remove_inserted_from_clusters)
@@ -67,11 +67,9 @@ def build_initial_solution(customers, restricted, depot, vehicles,
     remaining_bike.extend(dropped_back)
     bike_gt = build_bike_giant_tour(giant_tour, remaining_bike, customers, dist_matrix)
 
-    # 6. Split bike GT into bike routes (same algorithm as truck split)
-    from .split import split_to_trips as split_trips
-    bike_trips = split_trips(bike_gt, customers, dist_matrix, BIKE_CAPACITY,
-                             speed=BIKE_SPEED_URBAN)
-    bike_sol = _group_bike_trips(bike_trips, n_bikes, customers, dist_matrix)
+    # 6. Split bike GT into multi-trip bike routes (satellite-aware)
+    bike_sol = split_bike_gt(bike_gt, customers, dist_matrix, BIKE_CAPACITY,
+                             speed=BIKE_SPEED_URBAN, n_bikes=n_bikes)
 
     # 7. Fallback: any unserved customers get direct bike routes
     served = set()

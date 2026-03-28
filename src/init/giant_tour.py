@@ -121,21 +121,16 @@ def build_giant_tour(clusters, customers, depot, dist_matrix):
     return cw_savings_order(stops, dist_matrix)
 
 
+
 def build_bike_giant_tour(truck_gt, bike_customers, customers, dist_matrix):
-    """Cheapest insertion of bike customers into truck GT.
+    """TW-aware cheapest insertion of bike customers into truck GT.
 
-    GT_all starts as copy of truck GT. For each bike customer, find the
-    position in GT_all where insertion cost is minimum:
-      delta = d(GT[pos], c) + d(c, GT[pos+1]) - d(GT[pos], GT[pos+1])
-    Insert at that position. GT grows with each insertion.
-
+    Score = distance_delta + wait_penalty + late_penalty.
     Truck stops become RELOAD points for bikes.
-    Returns combined GT (deliver + reload stops).
     """
     if len(truck_gt) == 0 and len(bike_customers) == 0:
         return []
 
-    # Start with truck GT as backbone (RELOAD stops)
     gt_all = []
     for s in truck_gt:
         gt_all.append({
@@ -147,7 +142,6 @@ def build_bike_giant_tour(truck_gt, bike_customers, customers, dist_matrix):
     if len(bike_customers) == 0:
         return gt_all
 
-    # If truck GT is empty, build NN tour from bike customers only
     if len(gt_all) == 0:
         for c in bike_customers:
             c = int(c)

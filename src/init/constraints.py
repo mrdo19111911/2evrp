@@ -6,7 +6,7 @@ Each function is pure: input data -> output verdict.
 import numpy as np
 
 from ..data.constants import COL_DEMAND, COL_TW_CLOSE, ACT_DELIVER, ACT_RELOAD
-from ..data.cost import SERVICE_BASE, SERVICE_PER_100KG, DAY_LENGTH
+from ..data.cost import SERVICE_BASE, SERVICE_PER_100KG, DAY_LENGTH, RELOAD_SERVICE_TIME
 
 
 def calc_service_time(demand):
@@ -52,7 +52,7 @@ def check_trip_time_window(stops, actions, customers, dist_matrix, speed,
                 n_violations += 1
             clock += calc_service_time(float(customers[stops[i], COL_DEMAND]))
         elif actions[i] == ACT_RELOAD:
-            clock += calc_service_time(0.0)  # reload service time
+            clock += RELOAD_SERVICE_TIME
         prev = stops[i] + 1
     clock += dist_matrix[prev, start_node] / speed * 60.0  # return
     feasible = n_violations == 0 and clock <= DAY_LENGTH
