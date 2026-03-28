@@ -51,15 +51,27 @@ def build_initial_solution(customers, restricted, depot, vehicles,
     trips.extend(new_trips)
     clusters = remove_inserted_from_clusters(clusters, inserted)
 
-    # 4. Group trips → trucks (1 trip per truck)
+    # 4. Group trips → trucks (1 trip per truck). Excess trips dropped.
     truck_sol = group_trips_to_trucks(trips, n_trucks, customers, dist_matrix)
 
-    # 5. Build bike GT from truck GT + remaining bike customers
+    # Recover customers from dropped trips → back to bike pool
+    truck_placed = set()
+    for r in truck_sol:
+        for s, a in zip(r["stops"], r["actions"]):
+            if a == ACT_DELIVER:
+                truck_placed.add(int(s))
+    dropped_back = [int(c) for c in inserted if c not in truck_placed]
+
+    # 5. Build bike GT from truck GT + remaining bike customers + recovered
     remaining_bike = [int(c) for cl in clusters for c in cl["bike_nodes"]]
+    remaining_bike.extend(dropped_back)
     bike_gt = build_bike_giant_tour(giant_tour, remaining_bike, customers, dist_matrix)
 
-    # 6. Split bike GT into bike routes
-    bike_sol = _split_bike_gt_to_routes(bike_gt, customers, dist_matrix, n_bikes)
+    # 6. Split bike GT into bike routes (same algorithm as truck split)
+    from .split import split_to_trips as split_trips
+    bike_trips = split_trips(bike_gt, customers, dist_matrix, BIKE_CAPACITY,
+                             speed=BIKE_SPEED_URBAN)
+    bike_sol = _group_bike_trips(bike_trips, n_bikes, customers, dist_matrix)
 
     # 7. Fallback: any unserved customers get direct bike routes
     served = set()
@@ -89,79 +101,14 @@ def build_initial_solution(customers, restricted, depot, vehicles,
     return sol
 
 
-def _split_bike_gt_to_routes(bike_gt, customers, dist_matrix, n_bikes):
-    """Split bike giant tour into individual bike routes.
-    Each route: depot -> [deliver, deliver, ..., RELOAD, deliver, ...] -> depot
-    Respects BIKE_CAPACITY and DAY_LENGTH per route."""
-    if not bike_gt:
-        return []
-
-    speed = BIKE_SPEED_URBAN
-    routes = []
-    bid = 0
-    i = 0
-
-    while i < len(bike_gt) and bid < n_bikes:
-        route_stops = []
-        route_actions = []
-        route_load = 0.0
-        clock = 0.0
-        prev_dm = 0  # depot
-
-        while i < len(bike_gt):
-            stop = bike_gt[i]
-            node = stop["node"]
-
-            if stop["type"] == "reload":
-                # Truck stop = RELOAD point for bike
-                travel = dist_matrix[prev_dm, node + 1] / speed * 60.0
-                clock += travel
-                tw_open = float(customers[node, COL_TW_OPEN])
-                if clock < tw_open:
-                    clock = tw_open
-                clock += 5.0  # reload service time
-                depot_return = dist_matrix[node + 1, 0] / speed * 60.0
-                if clock + depot_return > DAY_LENGTH:
-                    break  # can't fit reload, start new route
-                route_stops.append(node)
-                route_actions.append(ACT_RELOAD)
-                route_load = 0.0  # bike reloads here
-                prev_dm = node + 1
-                i += 1
-            else:
-                # Deliver stop
-                demand = float(customers[node, COL_DEMAND])
-                if route_load + demand > BIKE_CAPACITY:
-                    break  # capacity full, need reload or new route
-
-                travel = dist_matrix[prev_dm, node + 1] / speed * 60.0
-                arrive = clock + travel
-                tw_open = float(customers[node, COL_TW_OPEN])
-                if arrive < tw_open:
-                    arrive = tw_open
-                service = calc_service_time(demand)
-                depot_return = dist_matrix[node + 1, 0] / speed * 60.0
-                if arrive + service + depot_return > DAY_LENGTH:
-                    break  # time limit
-                clock = arrive + service
-                route_stops.append(node)
-                route_actions.append(ACT_DELIVER)
-                route_load += demand
-                prev_dm = node + 1
-                i += 1
-
-        if route_stops:
-            routes.append({
-                "stops": np.array(route_stops, dtype=np.int32),
-                "actions": np.array(route_actions, dtype=np.int8),
-                "total_demand": route_load,
-                "total_distance": 0.0,
-                "bike_id": bid,
-            })
-            bid += 1
-        else:
-            i += 1  # skip unfittable stop
-
+def _group_bike_trips(bike_trips, n_bikes, customers, dist_matrix):
+    """Assign bike trips to bikes. Same as group_trips_to_trucks but for bikes."""
+    from .split import group_trips_to_trucks
+    routes = group_trips_to_trucks(bike_trips, n_bikes, customers, dist_matrix,
+                                   speed=BIKE_SPEED_URBAN)
+    # Rename truck_id -> bike_id
+    for i, r in enumerate(routes):
+        r["bike_id"] = r.pop("truck_id")
     return routes
 
 

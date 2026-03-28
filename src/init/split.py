@@ -49,19 +49,19 @@ def _compute_route_distance(route, dist_matrix):
     return float(total)
 
 
-def _estimate_trip_time(stops, customers, dist_matrix):
+def _estimate_trip_time(stops, customers, dist_matrix, speed=None):
     """Estimate time for 1 trip: depot -> stops -> depot.
     Includes travel + wait (arrive before tw_open) + service."""
     if len(stops) == 0:
         return 0.0
     from ..data.constants import COL_TW_OPEN
-    speed = TRUCK_SPEED_URBAN
+    if speed is None:
+        speed = TRUCK_SPEED_URBAN
     clock = 0.0
     prev = 0
     for s in stops:
         travel = dist_matrix[prev, s + 1] / speed * 60.0
         clock += travel
-        # Wait if arrive before TW opens
         tw_open = float(customers[s, COL_TW_OPEN])
         if clock < tw_open:
             clock = tw_open
@@ -71,13 +71,12 @@ def _estimate_trip_time(stops, customers, dist_matrix):
     return clock
 
 
-def group_trips_to_trucks(trips, n_trucks, customers, dist_matrix):
-    """1 trip = 1 truck. No multi-trip. No reload at depot.
+def group_trips_to_trucks(trips, n_trucks, customers, dist_matrix, speed=None):
+    """1 trip = 1 vehicle. No multi-trip. No reload at depot.
     Each vehicle does exactly one trip: depot -> customers -> depot.
     Extra trips beyond n_trucks are dropped (ALNS will handle unserved).
     Assigns shortest-time trips first to maximize utilization."""
-    # Sort trips by estimated time (shortest first = most likely to fit)
-    trip_times = [(i, _estimate_trip_time(t["stops"], customers, dist_matrix))
+    trip_times = [(i, _estimate_trip_time(t["stops"], customers, dist_matrix, speed))
                   for i, t in enumerate(trips)]
     trip_times.sort(key=lambda x: x[1])
 
@@ -102,7 +101,7 @@ def group_trips_to_trucks(trips, n_trucks, customers, dist_matrix):
     return result
 
 
-def split_to_trips(giant_tour, customers, dist_matrix, truck_capacity):
+def split_to_trips(giant_tour, customers, dist_matrix, capacity, speed=None):
     """Greedy split: fill each trip until capacity or DAY_LENGTH, then start new trip.
     Each trip: depot -> stops -> depot, within capacity + DAY_LENGTH.
     Returns list of trip dicts."""
@@ -111,7 +110,8 @@ def split_to_trips(giant_tour, customers, dist_matrix, truck_capacity):
         return []
 
     from ..data.constants import COL_TW_OPEN
-    speed = TRUCK_SPEED_URBAN
+    if speed is None:
+        speed = TRUCK_SPEED_URBAN
     trips = []
     i = 0
 
@@ -127,7 +127,7 @@ def split_to_trips(giant_tour, customers, dist_matrix, truck_capacity):
             demand = giant_tour[i]["demand"]
 
             # Capacity check
-            if trip_demand + demand > truck_capacity:
+            if trip_demand + demand > capacity:
                 break
 
             # Time check: travel + wait + service + return to depot

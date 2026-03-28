@@ -122,65 +122,67 @@ def build_giant_tour(clusters, customers, depot, dist_matrix):
 
 
 def build_bike_giant_tour(truck_gt, bike_customers, customers, dist_matrix):
-    """Insert bike customers into truck GT by nearest position.
-    Bikes follow same geographic direction as truck.
-    Each truck stop (big/satellite) = potential RELOAD point.
+    """Cheapest insertion of bike customers into truck GT.
 
-    Returns list of stops: mix of bike deliveries + truck stops (as RELOAD).
+    GT_all starts as copy of truck GT. For each bike customer, find the
+    position in GT_all where insertion cost is minimum:
+      delta = d(GT[pos], c) + d(c, GT[pos+1]) - d(GT[pos], GT[pos+1])
+    Insert at that position. GT grows with each insertion.
+
+    Truck stops become RELOAD points for bikes.
+    Returns combined GT (deliver + reload stops).
     """
-    if len(truck_gt) == 0 or len(bike_customers) == 0:
+    if len(truck_gt) == 0 and len(bike_customers) == 0:
         return []
 
-    # Truck GT defines backbone: sequence of nodes
-    backbone = [s["node"] for s in truck_gt]
+    # Start with truck GT as backbone (RELOAD stops)
+    gt_all = []
+    for s in truck_gt:
+        gt_all.append({
+            "node": s["node"], "type": "reload",
+            "demand": 0.0,
+            "cluster_idx": s.get("cluster_idx", -1),
+        })
 
-    # For each bike customer, find which segment (i, i+1) in backbone is closest
-    # Insert at that position
-    insertions = []  # (position_in_backbone, dist_to_segment, customer_idx)
-    for c in bike_customers:
-        c = int(c)
-        cn = c + 1  # dist_matrix index
-        best_pos = 0
-        best_dist = np.inf
-        for k in range(len(backbone)):
-            d = dist_matrix[backbone[k] + 1, cn]
-            if d < best_dist:
-                best_dist = d
-                best_pos = k
-        insertions.append((best_pos, best_dist, c))
+    if len(bike_customers) == 0:
+        return gt_all
 
-    # Sort insertions by position in backbone, then by distance (nearest first)
-    insertions.sort(key=lambda x: (x[0], x[1]))
-
-    # Build combined tour: interleave backbone stops with bike customers
-    # Group bike customers by their nearest backbone position
-    from collections import defaultdict
-    groups = defaultdict(list)
-    for pos, dist, c in insertions:
-        groups[pos].append(c)
-
-    combined = []
-    for k, stop in enumerate(truck_gt):
-        # Bike customers inserted BEFORE this truck stop
-        for c in groups.get(k, []):
-            combined.append({
+    # If truck GT is empty, build NN tour from bike customers only
+    if len(gt_all) == 0:
+        for c in bike_customers:
+            c = int(c)
+            gt_all.append({
                 "node": c, "type": "deliver",
                 "demand": float(customers[c, COL_DEMAND]),
                 "cluster_idx": -1,
             })
-        # Truck stop itself (becomes RELOAD point for bikes)
-        combined.append({
-            "node": stop["node"], "type": "reload",
-            "demand": 0.0,
-            "cluster_idx": stop.get("cluster_idx", -1),
-        })
+        return gt_all
 
-    # Bike customers after last backbone stop
-    for c in groups.get(len(backbone), []):
-        combined.append({
+    # Cheapest insertion: insert each bike customer one by one
+    for c in bike_customers:
+        c = int(c)
+        cn = c + 1  # dist_matrix index
+        n = len(gt_all)
+
+        best_pos = 0
+        best_delta = np.inf
+
+        for pos in range(n):
+            node_a = gt_all[pos]["node"]
+            node_b = gt_all[(pos + 1) % n]["node"]
+
+            delta = (dist_matrix[node_a + 1, cn]
+                     + dist_matrix[cn, node_b + 1]
+                     - dist_matrix[node_a + 1, node_b + 1])
+
+            if delta < best_delta:
+                best_delta = delta
+                best_pos = pos + 1  # insert AFTER pos
+
+        gt_all.insert(best_pos, {
             "node": c, "type": "deliver",
             "demand": float(customers[c, COL_DEMAND]),
             "cluster_idx": -1,
         })
 
-    return combined
+    return gt_all
