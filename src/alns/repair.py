@@ -250,9 +250,56 @@ def selective_drop_insertion(sol, removed, customers, restricted, dist_matrix,
         # else: near/mid-depot customer with no feasible position → DROP
 
 
+def blinks_insertion(sol, removed, customers, restricted, dist_matrix,
+                     vehicles, rng, params):
+    """Greedy insertion with blinks: randomly skip positions for diversity."""
+    if len(removed) == 0:
+        return
+    p_blink = params.get("blink_prob", 0.02)
+
+    # Sort: farthest from depot first (same as greedy)
+    dists = dist_matrix[0, removed + 1]
+    order = np.argsort(-dists)
+
+    for idx in order:
+        c = int(removed[idx])
+        if sol["cust_vehicle"][c] != -1:
+            continue
+        demand = customers[c, COL_DEMAND]
+        is_restricted = restricted[c] if c < len(restricted) else 0
+
+        best_vid, best_vtype, best_pos, best_cost = -1, VEH_TRUCK, 0, np.inf
+
+        for vtype, n_key, cap in [(VEH_TRUCK, "n_trucks", TRUCK_CAPACITY),
+                                   (VEH_BIKE, "n_bikes", BIKE_CAPACITY)]:
+            if is_restricted and vtype == VEH_TRUCK:
+                continue
+            for vid in range(sol[n_key]):
+                load_key = "truck_loads" if vtype == VEH_TRUCK else "bike_loads"
+                if sol[load_key][vid] + demand > cap:
+                    continue
+                pos, delta = best_insertion_pos(sol, vtype, vid, c, dist_matrix)
+                # Blink: skip this position with probability p_blink
+                if rng.random() < p_blink:
+                    continue
+                if delta < best_cost:
+                    best_cost = delta
+                    best_vid = vid
+                    best_vtype = vtype
+                    best_pos = pos
+
+        if best_vid >= 0:
+            insert_stop(sol, best_vtype, best_vid, best_pos, c, ACT_DELIVER,
+                        dist_matrix, customers)
+        else:
+            # Fallback: no blinks, evaluate all positions
+            _force_insert(sol, c, dist_matrix, customers)
+
+
 REPAIR_OPS = [
     greedy_insertion,
     regret_k_insertion,
     satellite_aware_insertion,
     selective_drop_insertion,
+    blinks_insertion,
 ]

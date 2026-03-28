@@ -47,13 +47,13 @@ def compute_sync_cost(truck_states, bike_states, satellites, delta_t):
 
 
 def _find_truck_depart(truck_states, truck_id, cust):
-    """Find truck DELIVER depart time at customer node."""
+    """Find truck RELOAD depart time at satellite node."""
     if truck_id >= len(truck_states):
         return None
     t_state = truck_states[truck_id]
     if len(t_state) == 0:
         return None
-    t_mask = (t_state[:, ST_CUST] == cust) & (t_state[:, ST_ACTION] == ACT_DELIVER)
+    t_mask = (t_state[:, ST_CUST] == cust) & (t_state[:, ST_ACTION] == ACT_RELOAD)
     if not np.any(t_mask):
         return None
     return float(t_state[t_mask][0, ST_DEPART])

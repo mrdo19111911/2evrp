@@ -75,14 +75,14 @@ def _init_all_weights():
     return dw, rw, cw, scores, counts
 
 
-def classify_result(accepted, new_eval, state):
-    """Return score: 5=new global best, 2=improving, 1=accepted worse, 0=rejected."""
+def classify_result(accepted, new_eval, state, config):
+    """Return score from config sigmas. Higher = better outcome."""
     if new_eval["fitness"] < state["best_fitness"] - 1e-10:
-        return 5
+        return config["sigma_3"]
     if accepted and new_eval["fitness"] < state["current_fitness"] - 1e-10:
-        return 2
+        return config["sigma_2"]
     if accepted:
-        return 1
+        return config["sigma_1"]
     return 0
 
 
@@ -141,6 +141,8 @@ def _apply_weight_update(state, w_key, scores, counts, reaction_factor):
     for i in range(len(w)):
         avg_score = scores[i] / max(counts[i], 1)
         w[i] = w[i] * (1 - reaction_factor) + reaction_factor * avg_score
+    min_w = 0.01
+    np.maximum(w, min_w, out=w)
     total = w.sum()
     if total > 1e-10:
         w /= total

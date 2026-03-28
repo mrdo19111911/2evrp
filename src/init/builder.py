@@ -62,9 +62,10 @@ def build_initial_solution(customers, restricted, depot, vehicles,
                 truck_placed.add(int(s))
     dropped_back = [int(c) for c in inserted if c not in truck_placed]
 
-    # 5. Build bike GT from truck GT + remaining bike customers + recovered
+    # 5. Build bike routes: assign customers to satellites, NN per satellite
     remaining_bike = [int(c) for cl in clusters for c in cl["bike_nodes"]]
     remaining_bike.extend(dropped_back)
+
     bike_gt = build_bike_giant_tour(giant_tour, remaining_bike, customers, dist_matrix)
 
     # 6. Split bike GT into multi-trip bike routes (satellite-aware)
@@ -97,6 +98,36 @@ def build_initial_solution(customers, restricted, depot, vehicles,
     # Recompute all distances from scratch (convoy bike routes don't track distance)
     _recompute_all_distances(sol, dist_matrix, n_trucks, n_bikes)
     return sol
+
+
+def _build_satellite_nn_gt(sat_nodes, sat_customers, customers, dist_matrix):
+    """Build bike GT: for each satellite, NN tour of its customers.
+    Returns GT list: [reload, deliver, deliver, ..., reload, deliver, ...]."""
+    gt = []
+    for sat in sat_nodes:
+        custs = sat_customers.get(sat, [])
+        if not custs:
+            continue
+        # Add reload stop at satellite
+        gt.append({"node": sat, "type": "reload", "demand": 0.0, "cluster_idx": -1})
+        # NN tour from satellite
+        remaining = list(custs)
+        current_dm = sat + 1
+        while remaining:
+            best_c, best_d = None, np.inf
+            for c in remaining:
+                d = dist_matrix[current_dm, c + 1]
+                if d < best_d:
+                    best_d = d
+                    best_c = c
+            gt.append({
+                "node": best_c, "type": "deliver",
+                "demand": float(customers[best_c, COL_DEMAND]),
+                "cluster_idx": -1,
+            })
+            current_dm = best_c + 1
+            remaining.remove(best_c)
+    return gt
 
 
 def _group_bike_trips(bike_trips, n_bikes, customers, dist_matrix):

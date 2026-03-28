@@ -81,7 +81,76 @@ def relocate_inter_route(sol, vtype, dist_matrix, customers):
     return improved
 
 
-def run_local_search(sol, dist_matrix, customers):
+def exchange_inter_route(sol, vtype, dist_matrix, customers, restricted):
+    """Swap 1 customer between 2 routes of same vtype. Returns True if improved."""
+    from src.solution.solution_ops import swap_stops_between
+    from src.solution.check import can_swap_customers
+
+    n_vehicles = sol["n_trucks"] if vtype == VEH_TRUCK else sol["n_bikes"]
+    if n_vehicles < 2:
+        return False
+
+    lengths = _get_lengths(sol, vtype)
+    stops = _get_stops(sol, vtype)
+    actions = _get_actions(sol, vtype)
+    improved = False
+
+    for va in range(n_vehicles):
+        La = int(lengths[va])
+        for pa in range(La):
+            if int(actions[va, pa]) != ACT_DELIVER:
+                continue
+            ca = int(stops[va, pa])
+
+            for vb in range(va + 1, n_vehicles):
+                Lb = int(lengths[vb])
+                for pb in range(Lb):
+                    if int(actions[vb, pb]) != ACT_DELIVER:
+                        continue
+                    cb = int(stops[vb, pb])
+
+                    if not can_swap_customers(sol, ca, cb, customers, restricted):
+                        continue
+
+                    # Delta: removal savings + insertion costs at each other's position
+                    rem_a = removal_cost_delta(sol, vtype, va, pa, dist_matrix)
+                    rem_b = removal_cost_delta(sol, vtype, vb, pb, dist_matrix)
+                    ins_b_at_a = _swap_insertion_delta(sol, vtype, va, pa, cb, dist_matrix)
+                    ins_a_at_b = _swap_insertion_delta(sol, vtype, vb, pb, ca, dist_matrix)
+                    delta = rem_a + rem_b + ins_b_at_a + ins_a_at_b
+
+                    if delta < -1e-6:
+                        swap_stops_between(sol, vtype, va, pa, vtype, vb, pb,
+                                           dist_matrix, customers)
+                        improved = True
+                        break
+                if improved:
+                    break
+            if improved:
+                break
+        if improved:
+            break
+    return improved
+
+
+def _swap_insertion_delta(sol, vtype, vid, pos, new_cust, dist_matrix):
+    """Cost of having new_cust at position pos instead of current customer.
+    = d(prev, new) + d(new, next) - d(prev, next)"""
+    if vtype == VEH_TRUCK:
+        stops, lengths = sol["truck_stops"], sol["truck_lengths"]
+    else:
+        stops, lengths = sol["bike_stops"], sol["bike_lengths"]
+    L = int(lengths[vid])
+    cn = new_cust + 1  # dist_matrix index
+
+    prev_dm = 0 if pos == 0 else int(stops[vid, pos - 1]) + 1
+    next_dm = 0 if pos >= L - 1 else int(stops[vid, pos + 1]) + 1
+
+    return (dist_matrix[prev_dm, cn] + dist_matrix[cn, next_dm]
+            - dist_matrix[prev_dm, next_dm])
+
+
+def run_local_search(sol, dist_matrix, customers, restricted=None):
     """Run all LS operators on all routes."""
     improved = False
     for t in range(sol["n_trucks"]):
@@ -98,4 +167,9 @@ def run_local_search(sol, dist_matrix, customers):
         improved = True
     if relocate_inter_route(sol, VEH_BIKE, dist_matrix, customers):
         improved = True
+    if restricted is not None:
+        if exchange_inter_route(sol, VEH_TRUCK, dist_matrix, customers, restricted):
+            improved = True
+        if exchange_inter_route(sol, VEH_BIKE, dist_matrix, customers, restricted):
+            improved = True
     return improved

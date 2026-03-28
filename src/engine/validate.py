@@ -82,10 +82,9 @@ def validate_time_windows(truck_states, bike_states, customers):
 
 
 def validate_sync(truck_states, bike_states, satellites, delta_t):
-    """Truck DELIVER and bike RELOAD at same satellite node within +-delta_t.
+    """Truck RELOAD and bike RELOAD at same satellite node within +-delta_t.
 
-    Virtual satellite: S0 -> C80 means truck DELIVERS to C80, bike RELOADs at C80.
-    Truck action = DELIVER (not RELOAD). Bike action = RELOAD.
+    Truck action = RELOAD (hands off goods). Bike action = RELOAD (receives goods).
 
     Returns (valid, violations).
     """
@@ -100,9 +99,9 @@ def validate_sync(truck_states, bike_states, satellites, delta_t):
             violations.append((s, "invalid_vehicle_id", {}))
             continue
 
-        # Truck DELIVERS to satellite real_node
+        # Truck RELOAD at satellite real_node (hands off goods to bikes)
         t_state = truck_states[truck_id]
-        t_mask = (t_state[:, ST_CUST] == cust) & (t_state[:, ST_ACTION] == ACT_DELIVER)
+        t_mask = (t_state[:, ST_CUST] == cust) & (t_state[:, ST_ACTION] == ACT_RELOAD)
         if not np.any(t_mask):
             violations.append((s, "truck_not_at_node", {}))
             continue

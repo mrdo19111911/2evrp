@@ -293,6 +293,135 @@ def inject_unserved(sol, customers, dist_matrix, rng, params):
     return unserved[order[:q]]
 
 
+def sisr_removal(sol, customers, dist_matrix, rng, params):
+    """SISR: remove strings of consecutive delivers from nearby routes."""
+    N = len(customers)
+    assigned = get_assigned_customers(sol, N)
+    if len(assigned) == 0:
+        return np.empty(0, dtype=np.int32)
+
+    q = rng.integers(params["q_min"], params["q_max"] + 1)
+    q = min(q, len(assigned))
+    if q == 0:
+        return np.empty(0, dtype=np.int32)
+
+    max_str_len = params.get("sisr_max_string_len", 8)
+    max_routes = params.get("sisr_max_routes", 3)
+
+    seed = int(rng.choice(assigned))
+    seed_vtype, seed_vid, seed_pos = get_customer_info(sol, seed)
+    if seed_vtype == -1:
+        return np.empty(0, dtype=np.int32)
+
+    targets = []
+    _collect_deliver_string(sol, seed_vtype, seed_vid, seed_pos,
+                            max_str_len, rng, targets)
+
+    # Find nearby routes
+    nearby = _find_nearby_routes_for_sisr(sol, seed, customers, dist_matrix)
+    for r_vtype, r_vid, r_pos in nearby[:max_routes - 1]:
+        if len(targets) >= q:
+            break
+        str_len = rng.integers(1, max_str_len + 1)
+        _collect_deliver_string(sol, r_vtype, r_vid, r_pos,
+                                str_len, rng, targets)
+
+    unique = list(set(targets))[:q]
+    if not unique:
+        return np.empty(0, dtype=np.int32)
+    return _remove_targets(sol, np.array(unique, dtype=np.int32),
+                           dist_matrix, customers)
+
+
+def _collect_deliver_string(sol, vtype, vid, center_pos, max_len, rng, out):
+    """Collect up to max_len consecutive DELIVER customers centered on center_pos."""
+    if vtype == VEH_TRUCK:
+        stops, actions, lengths = sol["truck_stops"], sol["truck_actions"], sol["truck_lengths"]
+    else:
+        stops, actions, lengths = sol["bike_stops"], sol["bike_actions"], sol["bike_lengths"]
+    L = int(lengths[vid])
+    if L == 0:
+        return
+
+    deliver_pos = [i for i in range(L) if int(actions[vid, i]) == ACT_DELIVER]
+    if not deliver_pos:
+        return
+
+    # Find closest deliver position to center_pos
+    center_idx = 0
+    for idx, p in enumerate(deliver_pos):
+        if p >= center_pos:
+            center_idx = idx
+            break
+    else:
+        center_idx = len(deliver_pos) - 1
+
+    str_len = rng.integers(1, min(max_len, len(deliver_pos)) + 1)
+    half = str_len // 2
+    start = max(0, center_idx - half)
+    end = min(len(deliver_pos), start + str_len)
+    start = max(0, end - str_len)
+
+    for idx in range(start, end):
+        out.append(int(stops[vid, deliver_pos[idx]]))
+
+
+def _find_nearby_routes_for_sisr(sol, seed, customers, dist_matrix):
+    """Find routes with customers near seed. Returns [(vtype, vid, nearest_pos)]."""
+    seed_vtype, seed_vid, _ = get_customer_info(sol, seed)
+    candidates = []
+
+    for vtype_val, n_key in [(VEH_TRUCK, "n_trucks"), (VEH_BIKE, "n_bikes")]:
+        for vid in range(sol[n_key]):
+            if vtype_val == seed_vtype and vid == seed_vid:
+                continue
+            custs = get_route_customers_only(sol, vtype_val, vid)
+            if len(custs) == 0:
+                continue
+            dists = dist_matrix[seed + 1, custs + 1]
+            nearest_idx = int(np.argmin(dists))
+            nearest_cust = int(custs[nearest_idx])
+            _, _, pos = get_customer_info(sol, nearest_cust)
+            candidates.append((float(dists[nearest_idx]), vtype_val, vid, pos))
+
+    candidates.sort(key=lambda x: x[0])
+    return [(vt, vi, p) for _, vt, vi, p in candidates]
+
+
+def cluster_removal(sol, customers, dist_matrix, rng, params):
+    """Remove ALL routes serving a geographic zone. Creates large hole for rebuild."""
+    N = len(customers)
+    assigned = get_assigned_customers(sol, N)
+    if len(assigned) == 0:
+        return np.empty(0, dtype=np.int32)
+
+    # Pick random seed, find zone
+    center = int(rng.choice(assigned))
+    cx, cy = customers[center, COL_X], customers[center, COL_Y]
+    dists = np.sqrt((customers[assigned, COL_X] - cx) ** 2 +
+                    (customers[assigned, COL_Y] - cy) ** 2)
+    radius = np.percentile(dists, params.get("zone_pct", 15))
+    zone_custs = set(int(c) for c in assigned[dists <= radius])
+
+    # Find ALL routes that have at least 1 customer in the zone
+    routes_to_clear = set()
+    for c in zone_custs:
+        vtype, vid, pos = get_customer_info(sol, c)
+        if vtype != -1:
+            routes_to_clear.add((vtype, vid))
+
+    # Clear entire routes
+    removed = []
+    for vtype, vid in routes_to_clear:
+        removed_pairs = clear_route(sol, vtype, vid)
+        for c, action in removed_pairs:
+            if action == ACT_DELIVER:
+                removed.append(c)
+            remove_satellites_for_customer(sol, c)
+
+    return np.array(removed, dtype=np.int32)
+
+
 DESTROY_OPS = [
     random_removal,
     worst_cost_removal,
@@ -304,4 +433,6 @@ DESTROY_OPS = [
     route_split_removal,
     cascade_worst_removal,
     inject_unserved,
+    sisr_removal,
+    cluster_removal,
 ]

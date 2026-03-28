@@ -28,7 +28,7 @@ def solve(customers, restricted, depot, vehicles, dist_matrix,
         new_sol = destroy_and_repair(sol, state, customers, restricted,
                                       dist_matrix, vehicles, rng, config)
         new_sol = maybe_local_search(new_sol, iteration, state, dist_matrix,
-                                      customers, config)
+                                      customers, restricted, config)
         new_sol = maybe_cross_layer(new_sol, iteration, state, customers,
                                      restricted, dist_matrix, rng, config)
         sol, state = accept_and_update(sol, new_sol, state, iteration,
@@ -56,11 +56,12 @@ def destroy_and_repair(sol, state, customers, restricted, dist_matrix,
     return new_sol
 
 
-def maybe_local_search(sol, iteration, state, dist_matrix, customers, config):
+def maybe_local_search(sol, iteration, state, dist_matrix, customers,
+                       restricted, config):
     """Run LS if on schedule. Returns sol."""
     if iteration % config["ls_frequency"] != 0:
         return sol
-    run_local_search(sol, dist_matrix, customers)
+    run_local_search(sol, dist_matrix, customers, restricted)
     return sol
 
 
@@ -85,7 +86,7 @@ def accept_and_update(sol, new_sol, state, iteration, customers, restricted,
     accepted = sa_accept(state["current_fitness"], new_eval["fitness"],
                           state["temperature"], rng)
 
-    score = classify_result(accepted, new_eval, state)
+    score = classify_result(accepted, new_eval, state, config)
     update_op_scores(state, score)
 
     if accepted:
