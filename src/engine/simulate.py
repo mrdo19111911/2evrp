@@ -59,18 +59,17 @@ def simulate_route(stops, actions, vehicle_type, vehicle_capacity, vehicle_speed
 
         else:  # ACT_RELOAD
             if vehicle_type == VEH_BIKE:
-                # Bike at satellite: got new goods from truck, reset load
+                # Bike at satellite: receives goods from truck
                 load_before = current_load
-                _, service, sync_wait = bike_reload_at_stop(
+                transfer_kg, service, sync_wait = bike_reload_at_stop(
                     cust, vehicle_id, arrive + tw_wait, satellites)
-                current_load = 0.0
+                current_load += transfer_kg  # add received goods to current load
             else:
                 # Truck at satellite: hands off goods to bikes
-                # Truck load += transfer_kg (truck carried these from depot)
                 load_before = current_load
                 load_change, service, sync_wait = truck_reload_at_stop(
                     cust, vehicle_id, current_load, arrive + tw_wait, satellites)
-                current_load += abs(load_change)  # load_change is negative, we want +
+                current_load += load_change  # load_change is negative (truck gives away)
             tw_wait += sync_wait
             start = arrive + tw_wait
             if current_load > vehicle_capacity:

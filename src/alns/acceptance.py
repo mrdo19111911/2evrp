@@ -1,10 +1,9 @@
 """Simulated Annealing acceptance criterion."""
 import numpy as np
 
-from src.alns.destroy import DESTROY_OPS, random_removal
-from src.alns.repair import REPAIR_OPS, greedy_insertion
+from src.alns.destroy import random_removal
+from src.alns.repair import greedy_insertion
 from src.solution.structure import copy_solution
-from src.data.cost import TRUCK_CAPACITY, BIKE_CAPACITY
 
 
 def sa_accept(current_fitness, new_fitness, temperature, rng):

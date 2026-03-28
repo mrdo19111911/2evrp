@@ -106,9 +106,81 @@ def build_giant_tour(clusters, customers, depot, dist_matrix):
                           "cluster_idx": -1})
 
         if len(cluster["bike_nodes"]) > 0:
-            sat_node = find_cluster_satellite(cluster, customers, dist_matrix)
-            sat_demand = float(customers[cluster["bike_nodes"], COL_DEMAND].sum())
+            # Pick satellite from bike_nodes (not big_nodes) to avoid dual-role conflict
+            bike_members = cluster["bike_nodes"]
+            sat_node = find_cluster_satellite(
+                {"members": bike_members, "centroid": cluster["centroid"]},
+                customers, dist_matrix)
+            # Satellite demand = bike customers only, excluding sat_node's own demand
+            # (sat_node serves as transfer point, its own delivery is separate)
+            other_bikes = bike_members[bike_members != sat_node]
+            sat_demand = float(customers[other_bikes, COL_DEMAND].sum()) if len(other_bikes) > 0 else 0.0
             stops.append({"node": sat_node, "type": "satellite",
                           "demand": sat_demand, "cluster_idx": i})
 
     return cw_savings_order(stops, dist_matrix)
+
+
+def build_bike_giant_tour(truck_gt, bike_customers, customers, dist_matrix):
+    """Insert bike customers into truck GT by nearest position.
+    Bikes follow same geographic direction as truck.
+    Each truck stop (big/satellite) = potential RELOAD point.
+
+    Returns list of stops: mix of bike deliveries + truck stops (as RELOAD).
+    """
+    if len(truck_gt) == 0 or len(bike_customers) == 0:
+        return []
+
+    # Truck GT defines backbone: sequence of nodes
+    backbone = [s["node"] for s in truck_gt]
+
+    # For each bike customer, find which segment (i, i+1) in backbone is closest
+    # Insert at that position
+    insertions = []  # (position_in_backbone, dist_to_segment, customer_idx)
+    for c in bike_customers:
+        c = int(c)
+        cn = c + 1  # dist_matrix index
+        best_pos = 0
+        best_dist = np.inf
+        for k in range(len(backbone)):
+            d = dist_matrix[backbone[k] + 1, cn]
+            if d < best_dist:
+                best_dist = d
+                best_pos = k
+        insertions.append((best_pos, best_dist, c))
+
+    # Sort insertions by position in backbone, then by distance (nearest first)
+    insertions.sort(key=lambda x: (x[0], x[1]))
+
+    # Build combined tour: interleave backbone stops with bike customers
+    # Group bike customers by their nearest backbone position
+    from collections import defaultdict
+    groups = defaultdict(list)
+    for pos, dist, c in insertions:
+        groups[pos].append(c)
+
+    combined = []
+    for k, stop in enumerate(truck_gt):
+        # Bike customers inserted BEFORE this truck stop
+        for c in groups.get(k, []):
+            combined.append({
+                "node": c, "type": "deliver",
+                "demand": float(customers[c, COL_DEMAND]),
+                "cluster_idx": -1,
+            })
+        # Truck stop itself (becomes RELOAD point for bikes)
+        combined.append({
+            "node": stop["node"], "type": "reload",
+            "demand": 0.0,
+            "cluster_idx": stop.get("cluster_idx", -1),
+        })
+
+    # Bike customers after last backbone stop
+    for c in groups.get(len(backbone), []):
+        combined.append({
+            "node": c, "type": "deliver",
+            "demand": float(customers[c, COL_DEMAND]),
+            "cluster_idx": -1,
+        })
+
+    return combined

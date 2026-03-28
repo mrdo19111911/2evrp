@@ -2,43 +2,22 @@
 import numpy as np
 
 from src.data.constants import ACT_DELIVER, ACT_PAD, VEH_TRUCK, VEH_BIKE, COL_DEMAND
-
-
-def _get_route_arrays(sol, vtype):
-    if vtype == VEH_TRUCK:
-        return sol["truck_stops"], sol["truck_actions"], sol["truck_lengths"]
-    return sol["bike_stops"], sol["bike_actions"], sol["bike_lengths"]
-
-
-def _get_loads(sol, vtype):
-    return sol["truck_loads"] if vtype == VEH_TRUCK else sol["bike_loads"]
-
-
-def _get_distances(sol, vtype):
-    return sol["truck_distances"] if vtype == VEH_TRUCK else sol["bike_distances"]
-
-
-def _global_vid(vtype, vid, n_trucks):
-    return vid if vtype == VEH_TRUCK else n_trucks + vid
-
-
-def _update_route_distance(sol, vtype, vid, dist_matrix):
-    stops, _, lengths = _get_route_arrays(sol, vtype)
-    L = lengths[vid]
-    if L == 0:
-        _get_distances(sol, vtype)[vid] = 0.0
-        return
-    total = dist_matrix[0, stops[vid, 0] + 1]
-    for i in range(L - 1):
-        total += dist_matrix[stops[vid, i] + 1, stops[vid, i + 1] + 1]
-    total += dist_matrix[stops[vid, L - 1] + 1, 0]
-    _get_distances(sol, vtype)[vid] = total
+from src.solution._helpers import (
+    get_route_arrays as _get_route_arrays,
+    get_loads as _get_loads,
+    get_distances as _get_distances,
+    global_vid as _global_vid,
+    update_route_distance as _update_route_distance,
+)
 
 
 def insert_stop(sol, vtype, vid, pos, customer, action, dist_matrix, customers):
     """Insert stop at pos in route. Update index + distance + load cache."""
     stops, actions, lengths = _get_route_arrays(sol, vtype)
     L = lengths[vid]
+
+    if L >= sol["max_route_len"]:
+        return  # route full, cannot insert
 
     # Shift right
     stops[vid, pos + 1:L + 1] = stops[vid, pos:L]
@@ -68,7 +47,9 @@ def insert_stop(sol, vtype, vid, pos, customer, action, dist_matrix, customers):
 def remove_stop(sol, vtype, vid, pos, dist_matrix, customers):
     """Remove stop at pos. Returns (removed_customer, removed_action)."""
     stops, actions, lengths = _get_route_arrays(sol, vtype)
-    L = lengths[vid]
+    L = int(lengths[vid])
+    if pos >= L or L == 0:
+        return -1, -1  # invalid position, nothing to remove
     removed_customer = int(stops[vid, pos])
     removed_action = int(actions[vid, pos])
 

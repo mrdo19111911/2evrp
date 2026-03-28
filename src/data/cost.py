@@ -16,7 +16,9 @@ TRUCK_FUEL_PRICE       = 21000      # VND / lit (diesel 2025)
 TRUCK_FUEL_COST_KM     = 3360       # VND / km (= 16 * 21000 / 100)
 TRUCK_MAINTENANCE_KM   = 1000       # VND / km (bao tri, lop, dau may)
 TRUCK_DEPRECIATION_KM  = 1500       # VND / km (khau hao ~550M / 350k km)
-TRUCK_TOTAL_KM         = 12000      # VND / km (tong chi phi van hanh)
+TRUCK_DRIVER_KM        = 2250       # VND / km (= 56250 / 25 km/h = driver cost per km)
+TRUCK_OTHER_KM         = 3890       # VND / km (toll, bao hiem, phi duong bo)
+TRUCK_TOTAL_KM         = 12000      # VND / km (= 3360 + 1000 + 1500 + 2250 + 3890)
 
 TRUCK_DRIVER_HOUR      = 56250      # VND / gio (~9M/thang / 160h)
 TRUCK_FIXED_DAY        = 500000     # VND / ngay (bao hiem, phi duong bo, dau xe, toll)
@@ -34,7 +36,9 @@ BIKE_FUEL_PRICE        = 25000      # VND / lit (RON 95, 2025)
 BIKE_FUEL_COST_KM      = 625        # VND / km (= 2.5 * 25000 / 100)
 BIKE_MAINTENANCE_KM    = 300        # VND / km
 BIKE_DEPRECIATION_KM   = 175        # VND / km (~35M / 200k km)
-BIKE_TOTAL_KM          = 5000       # VND / km (tong chi phi van hanh)
+BIKE_DRIVER_KM         = 1875       # VND / km (= 37500 / 20 km/h = driver cost per km)
+BIKE_OTHER_KM          = 2025       # VND / km (bao hiem, phu cap)
+BIKE_TOTAL_KM          = 5000       # VND / km (= 625 + 300 + 175 + 1875 + 2025)
 
 BIKE_DRIVER_HOUR       = 37500      # VND / gio (~6M/thang / 160h, shipper)
 BIKE_FIXED_DAY         = 50000      # VND / ngay (bao hiem)
@@ -77,11 +81,8 @@ RELOAD_HANDLING_COST   = 5000       # VND / lan (cong boc do)
 # ============================================================
 # MULTIPLE TRIPS
 # ============================================================
-# Xe co the chay nhieu chuyen trong ngay:
-# - Ve kho lay hang roi di tiep
-# - Ve satellite lay hang roi di tiep
-# Constraint: tong thoi gian tat ca trips <= DAY_LENGTH
-ALLOW_MULTIPLE_TRIPS   = True
+# Moi xe chi chay 1 chuyen/ngay: depot -> customers -> depot
+# Tong thoi gian phai <= DAY_LENGTH. Khong reload tai depot.
 
 # ============================================================
 # TIME — Thoi gian lam viec
@@ -103,6 +104,6 @@ PENALTY_OVERLOAD_KG_HEAVY = 100000  # / kg vuot tai (>10kg) — DEPRECATED
 PENALTY_OVERLOAD_THRESHOLD = 10.0   # kg: moc tang penalty — DEPRECATED
 PENALTY_SYNC_FAIL      = 100000     # / lan sync that bai
 PENALTY_RESTRICTION    = 200000     # / lan vi pham xe vao hem
-PENALTY_OVERTIME       = 20000      # / phut vuot qua DAY_LENGTH
+PENALTY_OVERTIME       = 100000     # / phut vuot qua DAY_LENGTH (phai du manh de force drop)
 PENALTY_MISSING_RELOAD = 1000000    # bike reload tai node ma truck KHONG den
 PENALTY_SYNC_GAP_MIN   = 20000      # VND / phut vuot epsilon (sync gap)

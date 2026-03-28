@@ -2,14 +2,22 @@
 import numpy as np
 
 from ..data.constants import (
-    ACT_RELOAD, COL_SERVICE_TIME, COL_DEMAND,
+    ACT_DELIVER, ACT_RELOAD, COL_SERVICE_TIME, COL_DEMAND,
     SAT_CUST, SAT_BIKE, SAT_TRUCK, SAT_KG, SAT_TIME,
     VCOL_SPEED,
 )
-from ..data.cost import TRUCK_SPEED_URBAN, BIKE_SPEED_URBAN, SYNC_DELTA_T
+from ..data.cost import (
+    TRUCK_SPEED_URBAN, BIKE_SPEED_URBAN, SYNC_DELTA_T,
+    SERVICE_BASE, SERVICE_PER_100KG,
+)
 
 
-def estimate_all_arrival_times(routes, dist_matrix, speed):
+def _calc_service_time(demand):
+    """Service time = base + per-100kg component."""
+    return SERVICE_BASE + SERVICE_PER_100KG * (demand / 100.0)
+
+
+def estimate_all_arrival_times(routes, dist_matrix, speed, customers=None):
     """Estimate arrival time at each stop. Returns list of ndarray."""
     if not routes:
         return []
@@ -20,18 +28,21 @@ def estimate_all_arrival_times(routes, dist_matrix, speed):
         n = len(stops)
         times = np.zeros(n, dtype=np.float64)
 
-        # Travel time from depot to first stop
         current_time = 0.0
         for i in range(n):
             if i == 0:
                 d = dist_matrix[0, stops[0] + 1]
             else:
                 d = dist_matrix[stops[i - 1] + 1, stops[i] + 1]
-            travel_time = d / speed * 60.0  # km / (km/h) * 60 = minutes
+            travel_time = d / speed * 60.0
             current_time += travel_time
             times[i] = current_time
-            # Add service time (approximation: 5 min per stop)
-            current_time += 5.0
+            # Use actual service time if customers data available
+            if customers is not None:
+                demand = float(customers[int(stops[i]), COL_DEMAND])
+                current_time += _calc_service_time(demand)
+            else:
+                current_time += SERVICE_BASE  # fallback
 
         result.append(times)
     return result
@@ -66,7 +77,9 @@ def match_reload_events(truck_sol, bike_sol, truck_times, bike_times, customers)
                 lookup_node = node if node in truck_reload_map else sat_node
 
                 if lookup_node in truck_reload_map and truck_reload_map[lookup_node]:
-                    match = truck_reload_map[lookup_node][0]
+                    # Pick truck visit closest in time to bike arrival
+                    candidates = truck_reload_map[lookup_node]
+                    match = min(candidates, key=lambda m: abs(m[2] - b_time))
                     t_idx = match[0]
                     t_time = match[2]
 
@@ -75,7 +88,7 @@ def match_reload_events(truck_sol, bike_sol, truck_times, bike_times, customers)
                 for k in range(pos + 1, len(route["stops"])):
                     if route["actions"][k] == ACT_RELOAD:
                         break
-                    if route["actions"][k] == 0:  # ACT_DELIVER
+                    if route["actions"][k] == ACT_DELIVER:
                         transfer_kg += float(customers[route["stops"][k], COL_DEMAND])
 
                 planned_time = max(t_time, b_time)
@@ -107,8 +120,8 @@ def synchronize_times(truck_sol, bike_sol, customers, dist_matrix, vehicles):
     truck_speed = TRUCK_SPEED_URBAN
     bike_speed = BIKE_SPEED_URBAN
 
-    truck_times = estimate_all_arrival_times(truck_sol, dist_matrix, truck_speed)
-    bike_times = estimate_all_arrival_times(bike_sol, dist_matrix, bike_speed)
+    truck_times = estimate_all_arrival_times(truck_sol, dist_matrix, truck_speed, customers)
+    bike_times = estimate_all_arrival_times(bike_sol, dist_matrix, bike_speed, customers)
     satellites = match_reload_events(truck_sol, bike_sol, truck_times, bike_times,
                                      customers)
     satellites = adjust_sync_times(satellites, truck_times, bike_times, SYNC_DELTA_T)

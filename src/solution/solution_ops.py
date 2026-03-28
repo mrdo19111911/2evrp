@@ -3,63 +3,42 @@ import numpy as np
 
 from src.data.constants import ACT_DELIVER, ACT_PAD, VEH_TRUCK, VEH_BIKE, COL_DEMAND
 from src.solution.route_ops import insert_stop, remove_stop
-
-
-def _get_route_arrays(sol, vtype):
-    if vtype == VEH_TRUCK:
-        return sol["truck_stops"], sol["truck_actions"], sol["truck_lengths"]
-    return sol["bike_stops"], sol["bike_actions"], sol["bike_lengths"]
-
-
-def _get_loads(sol, vtype):
-    return sol["truck_loads"] if vtype == VEH_TRUCK else sol["bike_loads"]
-
-
-def _get_distances(sol, vtype):
-    return sol["truck_distances"] if vtype == VEH_TRUCK else sol["bike_distances"]
-
-
-def _global_vid(vtype, vid, n_trucks):
-    return vid if vtype == VEH_TRUCK else n_trucks + vid
-
-
-def _update_route_distance(sol, vtype, vid, dist_matrix):
-    stops, _, lengths = _get_route_arrays(sol, vtype)
-    L = lengths[vid]
-    if L == 0:
-        _get_distances(sol, vtype)[vid] = 0.0
-        return
-    total = dist_matrix[0, stops[vid, 0] + 1]
-    for i in range(L - 1):
-        total += dist_matrix[stops[vid, i] + 1, stops[vid, i + 1] + 1]
-    total += dist_matrix[stops[vid, L - 1] + 1, 0]
-    _get_distances(sol, vtype)[vid] = total
-
-
-def _update_route_load(sol, vtype, vid, customers):
-    stops, actions, lengths = _get_route_arrays(sol, vtype)
-    L = lengths[vid]
-    total = 0.0
-    for i in range(L):
-        if actions[vid, i] == ACT_DELIVER:
-            total += customers[stops[vid, i], COL_DEMAND]
-    _get_loads(sol, vtype)[vid] = total
+from src.solution._helpers import (
+    get_route_arrays as _get_route_arrays,
+    get_loads as _get_loads,
+    get_distances as _get_distances,
+    global_vid as _global_vid,
+    update_route_distance as _update_route_distance,
+    update_route_load as _update_route_load,
+)
 
 
 def move_stop(sol, from_vtype, from_vid, from_pos, to_vtype, to_vid, to_pos,
               dist_matrix, customers):
     """Move stop from one route to another. Atomic remove+insert."""
     cust, action = remove_stop(sol, from_vtype, from_vid, from_pos, dist_matrix, customers)
+    # Adjust to_pos for same-route moves: after removal, positions shift left
+    if from_vtype == to_vtype and from_vid == to_vid and to_pos > from_pos:
+        to_pos -= 1
     insert_stop(sol, to_vtype, to_vid, to_pos, cust, action, dist_matrix, customers)
 
 
 def swap_stops_between(sol, vtype_a, vid_a, pos_a, vtype_b, vid_b, pos_b,
                        dist_matrix, customers):
-    """Swap stops between 2 different routes."""
+    """Swap stops between 2 routes. Must be different routes."""
+    same_route = (vtype_a == vtype_b and vid_a == vid_b)
     cust_a, act_a = remove_stop(sol, vtype_a, vid_a, pos_a, dist_matrix, customers)
-    cust_b, act_b = remove_stop(sol, vtype_b, vid_b, pos_b, dist_matrix, customers)
-    insert_stop(sol, vtype_a, vid_a, pos_a, cust_b, act_b, dist_matrix, customers)
-    insert_stop(sol, vtype_b, vid_b, pos_b, cust_a, act_a, dist_matrix, customers)
+    # Adjust pos_b if same route and pos_b was after pos_a
+    adj_pos_b = pos_b
+    if same_route and pos_b > pos_a:
+        adj_pos_b -= 1
+    cust_b, act_b = remove_stop(sol, vtype_b, vid_b, adj_pos_b, dist_matrix, customers)
+    # After both removals, insert back. Positions shift again for same route.
+    insert_stop(sol, vtype_a, vid_a, min(pos_a, _get_route_arrays(sol, vtype_a)[2][vid_a]),
+                cust_b, act_b, dist_matrix, customers)
+    adj_b = min(pos_b, _get_route_arrays(sol, vtype_b)[2][vid_b])
+    insert_stop(sol, vtype_b, vid_b, adj_b,
+                cust_a, act_a, dist_matrix, customers)
 
 
 def clear_route(sol, vtype, vid):

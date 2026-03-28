@@ -9,9 +9,12 @@ from src.engine.violations import compute_penalties, calc_unserved_penalty
 from src.engine.sync_cost import compute_sync_cost
 
 
-def compute_fitness(total_cost, sync_cost, total_penalty):
-    """Pure VND sum fitness. Lower = better."""
-    return total_cost + sync_cost + total_penalty
+FEASIBLE_ROUTE_BONUS = 2000000  # VND bonus per fully feasible route
+
+
+def compute_fitness(total_cost, sync_cost, total_penalty, n_feasible_routes=0):
+    """VND sum fitness with feasibility bonus. Lower = better."""
+    return total_cost + sync_cost + total_penalty - n_feasible_routes * FEASIBLE_ROUTE_BONUS
 
 
 def evaluate_solution(sol, customers, restricted, vehicles, dist_matrix,
@@ -45,9 +48,28 @@ def evaluate_solution(sol, customers, restricted, vehicles, dist_matrix,
     makespan = compute_makespan(truck_return_times, bike_return_times)
     sync_cost, sync_breakdown = compute_sync_cost(
         truck_states, bike_states, satellites, delta_t)
+    # Add return_times to report for overtime penalty calculation
+    all_return_times = list(truck_return_times) + list(bike_return_times)
+    report["return_times"] = all_return_times
+
     total_penalty, _ = compute_penalties(report, penalty_weights,
                                          customers, dist_matrix)
-    fitness = compute_fitness(total_cost, sync_cost, total_penalty)
+
+    # Count feasible routes (all stops within TW + return within DAY_LENGTH)
+    from src.data.cost import DAY_LENGTH
+    tw_viol_routes = set()
+    for (vtype, vid, *_) in report["time_windows"]["violations"]:
+        tw_viol_routes.add((vtype, vid))
+    n_feasible = 0
+    for i, rt in enumerate(truck_return_times):
+        if rt <= DAY_LENGTH and ("truck", i) not in tw_viol_routes and truck_return_times[i] > 0:
+            n_feasible += 1
+    for i, rt in enumerate(bike_return_times):
+        if rt <= DAY_LENGTH and ("bike", i) not in tw_viol_routes and bike_return_times[i] > 0:
+            n_feasible += 1
+
+    fitness = compute_fitness(total_cost, sync_cost, total_penalty, n_feasible)
+    report["return_times"] = all_return_times
 
     return {
         "fitness": fitness, "cost": total_cost, "sync_cost": sync_cost,

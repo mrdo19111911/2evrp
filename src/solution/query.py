@@ -2,12 +2,7 @@
 import numpy as np
 
 from src.data.constants import ACT_DELIVER, VEH_TRUCK, VEH_BIKE
-
-
-def _get_route_arrays(sol, vtype):
-    if vtype == VEH_TRUCK:
-        return sol["truck_stops"], sol["truck_actions"], sol["truck_lengths"]
-    return sol["bike_stops"], sol["bike_actions"], sol["bike_lengths"]
+from src.solution._helpers import get_route_arrays as _get_route_arrays
 
 
 def get_unassigned_customers(sol, n_customers):

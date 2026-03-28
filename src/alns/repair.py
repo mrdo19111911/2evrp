@@ -14,27 +14,50 @@ from src.solution.check import can_insert_customer
 
 
 def _force_insert(sol, customer, dist_matrix, customers):
-    """Insert into shortest feasible route. Heavy → truck only, never bike."""
+    """Try to insert at cheapest TW+time-feasible position.
+    Skip routes already over DAY_LENGTH. Leave unserved if no feasible route."""
+    from src.solution.delta import (
+        _check_tw_at_insertion, _estimate_route_return_time,
+    )
+    from src.data.cost import DAY_LENGTH
+
     demand = customers[customer, COL_DEMAND]
-    best_vid, best_vtype, best_len = -1, VEH_TRUCK, 999999
+    best_vid, best_vtype, best_pos, best_cost = -1, VEH_TRUCK, 0, np.inf
+    has_feasible = False
 
-    # Always try trucks first
     for t in range(sol["n_trucks"]):
-        if sol["truck_lengths"][t] < best_len:
-            best_len = sol["truck_lengths"][t]
-            best_vid, best_vtype = t, VEH_TRUCK
+        rt = _estimate_route_return_time(sol, VEH_TRUCK, t, dist_matrix, customers)
+        if rt > DAY_LENGTH:
+            continue
+        pos, delta = best_insertion_pos(sol, VEH_TRUCK, t, customer, dist_matrix)
+        tw_ok = _check_tw_at_insertion(sol, VEH_TRUCK, t, pos, customer,
+                                        dist_matrix, customers)
+        cost = delta if tw_ok else delta + 1e8
+        if tw_ok:
+            has_feasible = True
+        if cost < best_cost:
+            best_cost = cost
+            best_vid, best_vtype, best_pos = t, VEH_TRUCK, pos
 
-    # Only try bikes if demand fits
     if demand <= BIKE_CAPACITY:
         for b in range(sol["n_bikes"]):
-            if sol["bike_lengths"][b] < best_len:
-                best_len = sol["bike_lengths"][b]
-                best_vid, best_vtype = b, VEH_BIKE
+            rt = _estimate_route_return_time(sol, VEH_BIKE, b, dist_matrix, customers)
+            if rt > DAY_LENGTH:
+                continue
+            pos, delta = best_insertion_pos(sol, VEH_BIKE, b, customer, dist_matrix)
+            tw_ok = _check_tw_at_insertion(sol, VEH_BIKE, b, pos, customer,
+                                            dist_matrix, customers)
+            cost = delta if tw_ok else delta + 1e8
+            if tw_ok:
+                has_feasible = True
+            if cost < best_cost:
+                best_cost = cost
+                best_vid, best_vtype, best_pos = b, VEH_BIKE, pos
 
-    if best_vid >= 0:
-        pos, _ = best_insertion_pos(sol, best_vtype, best_vid, customer, dist_matrix)
-        insert_stop(sol, best_vtype, best_vid, pos, customer, ACT_DELIVER,
+    if best_vid >= 0 and has_feasible:
+        insert_stop(sol, best_vtype, best_vid, best_pos, customer, ACT_DELIVER,
                      dist_matrix, customers)
+    # else: all routes full or over DAY_LENGTH → leave unserved
 
 
 def _greedy_insert_single(sol, customer, customers, restricted, dist_matrix):
@@ -67,8 +90,10 @@ def _greedy_insert_single(sol, customer, customers, restricted, dist_matrix):
 
 def greedy_insertion(sol, removed, customers, restricted, dist_matrix,
                      vehicles, rng, params):
-    """Insert each customer at cheapest position."""
-    order = rng.permutation(removed)
+    """Insert each customer at cheapest position. Farthest from depot first."""
+    # Sort farthest-first: hard-to-place customers get priority
+    dists = np.array([dist_matrix[0, int(c) + 1] for c in removed])
+    order = removed[np.argsort(-dists)]  # descending distance from depot
     for c in order:
         _greedy_insert_single(sol, int(c), customers, restricted, dist_matrix)
 
@@ -179,8 +204,55 @@ def satellite_aware_insertion(sol, removed, customers, restricted, dist_matrix,
             _greedy_insert_single(sol, c, customers, restricted, dist_matrix)
 
 
+def selective_drop_insertion(sol, removed, customers, restricted, dist_matrix,
+                             vehicles, rng, params):
+    """Insert far customers first. Drop near-depot customers if no TW-feasible position.
+    Real-world: prioritize hard-to-reach customers, sacrifice easy ones."""
+    from src.solution.delta import _check_tw_at_insertion
+
+    # Sort farthest-first
+    dists = np.array([dist_matrix[0, int(c) + 1] for c in removed])
+    order = removed[np.argsort(-dists)]
+
+    max_d = float(dist_matrix[0, 1:].max()) if dist_matrix.shape[1] > 1 else 1.0
+
+    for c in order:
+        c = int(c)
+        demand = customers[c, COL_DEMAND]
+        d_depot = dist_matrix[0, c + 1]
+        importance = d_depot / max(max_d, 1.0)  # 0 = at depot, 1 = farthest
+
+        # Try TW-feasible insertion first
+        best_move = None
+        best_cost = np.inf
+
+        if restricted[c] != 1:
+            vid, pos, delta = find_best_insertion_all_routes(
+                sol, VEH_TRUCK, c, dist_matrix, customers, TRUCK_CAPACITY)
+            if delta < best_cost:
+                best_cost = delta
+                best_move = (VEH_TRUCK, vid, pos)
+
+        if demand <= BIKE_CAPACITY:
+            vid, pos, delta = find_best_insertion_all_routes(
+                sol, VEH_BIKE, c, dist_matrix, customers, BIKE_CAPACITY)
+            if delta < best_cost:
+                best_cost = delta
+                best_move = (VEH_BIKE, vid, pos)
+
+        if best_move is not None:
+            vtype, vid, pos = best_move
+            insert_stop(sol, vtype, vid, pos, c, ACT_DELIVER,
+                         dist_matrix, customers)
+        elif importance > 0.5:
+            # Far customer, no TW-feasible position: force insert anyway
+            _force_insert(sol, c, dist_matrix, customers)
+        # else: near/mid-depot customer with no feasible position → DROP
+
+
 REPAIR_OPS = [
     greedy_insertion,
     regret_k_insertion,
     satellite_aware_insertion,
+    selective_drop_insertion,
 ]

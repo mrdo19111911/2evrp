@@ -29,12 +29,15 @@ def swap_assignment(sol, customers, restricted, dist_matrix, satellites, rng, pa
     flexible = []
     for c_raw in assigned:
         c = int(c_raw)
-        if customers[c, COL_DEMAND] > BIKE_CAPACITY:
-            continue
         if restricted[c] == 1:
             continue
         vt = int(sol["cust_vtype"][c])
-        if vt == VEH_TRUCK:
+        demand = customers[c, COL_DEMAND]
+        # Truck->bike: only if demand fits in bike
+        if vt == VEH_TRUCK and demand <= BIKE_CAPACITY:
+            flexible.append(c)
+        # Bike->truck: any bike customer can move to truck
+        elif vt == VEH_BIKE:
             flexible.append(c)
 
     if not flexible:

@@ -11,30 +11,35 @@ from .repair import REPAIR_OPS
 from .crosslayer import CROSS_OPS
 from ..solution.structure import copy_solution
 from ..engine.fitness import evaluate_solution
+from ..data.cost import SYNC_DELTA_T
 
 
-def setup(data, config_overrides, seed):
+def setup(customers, config_overrides, seed):
     """Config + rng."""
-    n_cust = len(data["orders"])
+    n_cust = len(customers)
     config = make_config(n_cust, config_overrides or {})
     rng = np.random.default_rng(seed)
     return config, rng
 
 
-def eval_sol(sol, data, state, config):
+def eval_sol(sol, customers, restricted, vehicles, dist_matrix, state, config):
     """Helper: evaluate solution with current penalty weights."""
     pw = state["penalty_weights"]
-    return evaluate_solution(
-        sol, data, config.get("delta_t", 15.0), pw)
+    delta_t = config.get("delta_t", SYNC_DELTA_T)
+    return evaluate_solution(sol, customers, restricted, vehicles,
+                             dist_matrix, delta_t, pw)
 
 
-def init_search_state(sol, data, config, rng):
+def init_search_state(sol, customers, restricted, vehicles, dist_matrix,
+                      config, rng):
     """Init all state: fitness, best, temperature, weights, log, archive."""
     pw, w3 = init_penalty_weights(config)
     state = {"penalty_weights": pw, "w3": w3}
 
-    eval_result = eval_sol(sol, data, state, config)
-    temp = compute_initial_temperature(sol, data, config, rng)
+    eval_result = eval_sol(sol, customers, restricted, vehicles,
+                           dist_matrix, state, config)
+    temp = compute_initial_temperature(sol, customers, restricted, vehicles,
+                                       dist_matrix, config, rng)
     dw, rw, cw, scores, counts = _init_all_weights()
 
     return {
@@ -87,6 +92,10 @@ def update_op_scores(state, score):
     state["counts"]["destroy"][state["last_d_idx"]] += 1
     state["scores"]["repair"][state["last_r_idx"]] += score
     state["counts"]["repair"][state["last_r_idx"]] += 1
+    if state.get("cross_used", False):
+        state["scores"]["cross"][state["last_cx_idx"]] += score
+        state["counts"]["cross"][state["last_cx_idx"]] += 1
+        state["cross_used"] = False
 
 
 def update_best(state, sol, new_eval):

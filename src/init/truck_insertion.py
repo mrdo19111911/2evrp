@@ -106,22 +106,37 @@ def build_new_trips_from_remaining(candidates, customers, dist_matrix, restricte
     if not remaining:
         return [], inserted
 
+    # Sort farthest-from-depot first: serve periphery before core
+    remaining.sort(key=lambda c: -dist_matrix[0, c + 1])
+
     new_trips = []
     used = set()
 
     while remaining:
-        # Start new trip from depot, pick nearest unvisited
+        # Start new trip: pick farthest unserved as seed, then nearest-neighbor
         trip_stops = []
         trip_actions = []
         trip_load = 0.0
         current_dm = 0  # depot
+        skipped_this_trip = set()
 
-        while remaining:
-            # Find nearest feasible customer
+        # First stop: farthest remaining customer (already sorted)
+        seed = remaining[0]
+        demand = float(customers[seed, COL_DEMAND])
+        if demand <= truck_capacity:
+            trip_stops.append(seed)
+            trip_actions.append(ACT_DELIVER)
+            trip_load = demand
+            current_dm = seed + 1
+            used.add(seed)
+            remaining = [c for c in remaining if c not in used]
+
+        while True:
+            # Find nearest feasible customer from current position
             best_node = None
             best_dist = np.inf
             for c in remaining:
-                if c in used:
+                if c in used or c in skipped_this_trip:
                     continue
                 d = dist_matrix[current_dm, c + 1]
                 if d < best_dist:
@@ -133,7 +148,8 @@ def build_new_trips_from_remaining(candidates, customers, dist_matrix, restricte
 
             demand = float(customers[best_node, COL_DEMAND])
             if trip_load + demand > truck_capacity:
-                break  # trip full, start new trip
+                skipped_this_trip.add(best_node)
+                continue  # try another customer
 
             # Trial: check time with this customer added
             trial_stops = np.array(trip_stops + [best_node], dtype=np.int32)
@@ -142,14 +158,16 @@ def build_new_trips_from_remaining(candidates, customers, dist_matrix, restricte
                 trial_stops, trial_actions, customers, dist_matrix,
                 TRUCK_SPEED_URBAN)
             if not tw_ok or total_time > DAY_LENGTH:
-                break  # trip out of time, start new trip
+                skipped_this_trip.add(best_node)
+                continue  # try another customer in this trip
 
             trip_stops.append(best_node)
             trip_actions.append(ACT_DELIVER)
             trip_load += demand
             current_dm = best_node + 1
             used.add(best_node)
-            remaining = [c for c in remaining if c not in used]
+
+        remaining = [c for c in remaining if c not in used]
 
         if trip_stops:
             new_trips.append({

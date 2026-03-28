@@ -47,10 +47,10 @@ def group_by_label(labels, customers, restricted):
         demands = customers[members, COL_DEMAND]
         big_mask = demands > BIKE_CAPACITY
         rest_mask = restricted[members] == 1
-        # big_nodes: demand > BIKE_CAPACITY and not restricted
-        big_nodes = members[big_mask & ~rest_mask]
-        # bike_nodes: demand <= BIKE_CAPACITY or restricted
-        bike_nodes = members[~big_mask | rest_mask]
+        # big_nodes: demand > BIKE_CAPACITY (truck must serve, regardless of restriction)
+        big_nodes = members[big_mask]
+        # bike_nodes: demand <= BIKE_CAPACITY (restricted customers still bike-compatible)
+        bike_nodes = members[~big_mask]
         centroid = customers[members][:, [COL_X, COL_Y]].mean(axis=0)
         clusters.append({
             "members": members,
@@ -73,41 +73,55 @@ def cluster_customers(customers, restricted, dist_matrix, rng):
     return group_by_label(labels, customers, restricted)
 
 
-def make_single_cluster(customer_idx, customers):
+def make_single_cluster(customer_idx, customers, restricted=None):
     """1 customer -> 1 cluster dict."""
     c = customer_idx
     demand = float(customers[c, COL_DEMAND])
     members = np.array([c], dtype=np.int32)
     is_big = demand > BIKE_CAPACITY
+    is_rest = restricted is not None and restricted[c] == 1
     return {
         "members": members,
         "big_nodes": members if is_big else np.array([], dtype=np.int32),
         "bike_nodes": np.array([], dtype=np.int32) if is_big else members,
-        "restricted": np.array([], dtype=np.int32),
+        "restricted": members if is_rest else np.array([], dtype=np.int32),
         "total_demand": demand,
         "centroid": customers[c, [COL_X, COL_Y]].copy(),
     }
 
 
-def split_cluster(members, customers, k=2):
+def split_cluster(members, customers, restricted=None, k=2):
     """Split 1 cluster into k sub-clusters."""
+    if len(members) <= k:
+        # Can't split further, return as single cluster
+        demands = customers[members, COL_DEMAND]
+        big_mask = demands > BIKE_CAPACITY
+        rest_mask = restricted[members] == 1 if restricted is not None else np.zeros(len(members), dtype=bool)
+        centroid = customers[members][:, [COL_X, COL_Y]].mean(axis=0)
+        return [{
+            "members": members,
+            "big_nodes": members[big_mask],
+            "bike_nodes": members[~big_mask],
+            "restricted": members[rest_mask],
+            "total_demand": float(demands.sum()),
+            "centroid": centroid,
+        }]
+
     coords = customers[members][:, [COL_X, COL_Y]]
     rng = np.random.default_rng(0)
     labels = kmeans(coords, k, rng)
-    # Build restricted array for these members (all zeros since we don't know)
-    restricted = np.zeros(len(customers), dtype=np.int8)
-    # Re-map labels to build sub-clusters
     result = []
     for lbl in np.unique(labels):
         sub_members = members[labels == lbl]
         demands = customers[sub_members, COL_DEMAND]
         big_mask = demands > BIKE_CAPACITY
+        rest_mask = restricted[sub_members] == 1 if restricted is not None else np.zeros(len(sub_members), dtype=bool)
         centroid = customers[sub_members][:, [COL_X, COL_Y]].mean(axis=0)
         result.append({
             "members": sub_members,
             "big_nodes": sub_members[big_mask],
             "bike_nodes": sub_members[~big_mask],
-            "restricted": np.array([], dtype=np.int32),
+            "restricted": sub_members[rest_mask],
             "total_demand": float(demands.sum()),
             "centroid": centroid,
         })

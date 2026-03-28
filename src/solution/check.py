@@ -21,7 +21,7 @@ def can_insert_customer(sol, vtype, vid, customer, customers, restricted, vehicl
     demand = customers[customer, COL_DEMAND]
     if _get_loads(sol, vtype)[vid] + demand > vehicle_capacity:
         return False
-    if _get_lengths(sol, vtype)[vid] >= sol["max_route_len"] - 1:
+    if _get_lengths(sol, vtype)[vid] >= sol["max_route_len"]:
         return False
     return True
 
@@ -34,7 +34,7 @@ def can_move_customer(sol, customer, to_vtype, to_vid, customers, restricted, ve
                                vehicle_capacity)
 
 
-def can_swap_customers(sol, cust_a, cust_b, customers, restricted):
+def can_swap_customers(sol, cust_a, cust_b, customers, restricted, vehicles=None):
     """O(1) feasibility: can swap 2 customers between their routes?"""
     vtype_a, vid_a, _ = get_customer_info(sol, cust_a)
     vtype_b, vid_b, _ = get_customer_info(sol, cust_b)

@@ -73,6 +73,7 @@ def maybe_cross_layer(sol, iteration, state, customers, restricted,
     CROSS_OPS[cx_idx](sol, customers, restricted, dist_matrix,
                        sol["satellites"], rng, {})
     state["last_cx_idx"] = cx_idx
+    state["cross_used"] = True
     return sol
 
 

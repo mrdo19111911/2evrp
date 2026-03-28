@@ -21,13 +21,6 @@ def init_penalty_weights(config):
     return penalty_weights, float(w3)
 
 
-def decay_penalty_weight(w3, config):
-    """Geometric decay per iteration."""
-    decay_rate = config.get("penalty_decay_rate", 0.9999)
-    w3_end = config.get("penalty_w3_end", 0.1)
-    return max(w3 * decay_rate, w3_end)
-
-
 def adaptive_penalty_adjustment(w3, feasible_history, config):
     """Feedback: increase w3 if too few feasible, decrease if stable."""
     feas_rate = float(np.mean(feasible_history))

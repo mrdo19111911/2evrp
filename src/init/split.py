@@ -50,14 +50,21 @@ def _compute_route_distance(route, dist_matrix):
 
 
 def _estimate_trip_time(stops, customers, dist_matrix):
-    """Estimate time for 1 trip: depot -> stops -> depot."""
+    """Estimate time for 1 trip: depot -> stops -> depot.
+    Includes travel + wait (arrive before tw_open) + service."""
     if len(stops) == 0:
         return 0.0
+    from ..data.constants import COL_TW_OPEN
     speed = TRUCK_SPEED_URBAN
     clock = 0.0
     prev = 0
     for s in stops:
-        clock += dist_matrix[prev, s + 1] / speed * 60.0
+        travel = dist_matrix[prev, s + 1] / speed * 60.0
+        clock += travel
+        # Wait if arrive before TW opens
+        tw_open = float(customers[s, COL_TW_OPEN])
+        if clock < tw_open:
+            clock = tw_open
         clock += calc_service_time(float(customers[s, COL_DEMAND]))
         prev = s + 1
     clock += dist_matrix[prev, 0] / speed * 60.0
@@ -65,111 +72,96 @@ def _estimate_trip_time(stops, customers, dist_matrix):
 
 
 def group_trips_to_trucks(trips, n_trucks, customers, dist_matrix):
-    """Group trips into trucks, multiple trips per truck within DAY_LENGTH.
-    Assigns to least-busy truck. Returns list of truck route dicts."""
-    truck_times = np.zeros(n_trucks, dtype=np.float64)
-    truck_routes = [{"stops": [], "actions": [], "total_demand": 0.0,
-                     "total_distance": 0.0, "n_trips": 0}
-                    for _ in range(n_trucks)]
+    """1 trip = 1 truck. No multi-trip. No reload at depot.
+    Each vehicle does exactly one trip: depot -> customers -> depot.
+    Extra trips beyond n_trucks are dropped (ALNS will handle unserved).
+    Assigns shortest-time trips first to maximize utilization."""
+    # Sort trips by estimated time (shortest first = most likely to fit)
+    trip_times = [(i, _estimate_trip_time(t["stops"], customers, dist_matrix))
+                  for i, t in enumerate(trips)]
+    trip_times.sort(key=lambda x: x[1])
 
-    for trip in trips:
-        trip_time = _estimate_trip_time(trip["stops"], customers, dist_matrix)
-        tid = int(np.argmin(truck_times))
-
-        if truck_times[tid] + trip_time > DAY_LENGTH:
-            # All trucks busy — try to find any truck that fits
-            fits = np.where(truck_times + trip_time <= DAY_LENGTH)[0]
-            if len(fits) > 0:
-                tid = int(fits[np.argmin(truck_times[fits])])
-            else:
-                # No truck fits — assign to least-busy anyway (ALNS fixes later)
-                tid = int(np.argmin(truck_times))
-
-        tr = truck_routes[tid]
-        # Insert RELOAD (return to depot) between trips
-        if tr["n_trips"] > 0:
-            # Use depot node -1 convention? No — truck returns to depot implicitly.
-            # In simulation, consecutive stops are connected via dist_matrix.
-            # We don't need explicit RELOAD for truck — truck auto-returns to depot
-            # between trips. But we need a depot marker for load reset.
-            # Actually: truck load doesn't reset at depot in current model.
-            # Truck load = cumulative. So no RELOAD needed, just append stops.
-            pass
-
-        tr["stops"].extend(trip["stops"].tolist())
-        tr["actions"].extend(trip["actions"].tolist())
-        tr["total_demand"] += trip["total_demand"]
-        tr["total_distance"] += trip.get("total_distance", 0.0)
-        tr["n_trips"] += 1
-        truck_times[tid] += trip_time
-
-    # Convert to numpy
     result = []
-    for tid, tr in enumerate(truck_routes):
-        if len(tr["stops"]) == 0:
-            continue
+    used_trucks = 0
+
+    for trip_idx, trip_time in trip_times:
+        if used_trucks >= n_trucks:
+            break  # no more trucks available, remaining trips dropped
+        if trip_time > DAY_LENGTH:
+            continue  # trip itself exceeds DAY_LENGTH, skip
+
+        trip = trips[trip_idx]
         result.append({
-            "stops": np.array(tr["stops"], dtype=np.int32),
-            "actions": np.array(tr["actions"], dtype=np.int8),
-            "total_demand": tr["total_demand"],
-            "total_distance": tr["total_distance"],
-            "truck_id": tid,
+            "stops": np.array(trip["stops"], dtype=np.int32) if not isinstance(trip["stops"], np.ndarray) else trip["stops"],
+            "actions": np.array(trip["actions"], dtype=np.int8) if not isinstance(trip["actions"], np.ndarray) else trip["actions"],
+            "total_demand": trip["total_demand"],
+            "total_distance": trip.get("total_distance", 0.0),
+            "truck_id": used_trucks,
         })
+        used_trucks += 1
     return result
 
 
 def split_to_trips(giant_tour, customers, dist_matrix, truck_capacity):
-    """Split giant tour into individual trips. Each trip respects capacity + DAY_LENGTH.
+    """Greedy split: fill each trip until capacity or DAY_LENGTH, then start new trip.
+    Each trip: depot -> stops -> depot, within capacity + DAY_LENGTH.
     Returns list of trip dicts."""
     n = len(giant_tour)
     if n == 0:
         return []
 
+    from ..data.constants import COL_TW_OPEN
     speed = TRUCK_SPEED_URBAN
-    cost = np.full(n + 1, np.inf)
-    pred = np.full(n + 1, -1, dtype=np.int64)
-    cost[0] = 0.0
+    trips = []
+    i = 0
 
-    for i in range(n):
-        if cost[i] == np.inf:
-            continue
-        load = 0.0
+    while i < n:
+        trip_stops = []
+        trip_actions = []
+        trip_demand = 0.0
         clock = 0.0
         prev_dm = 0  # depot
 
-        for j in range(i, n):
-            node = giant_tour[j]["node"]
-            load += giant_tour[j]["demand"]
-            if load > truck_capacity:
+        while i < n:
+            node = giant_tour[i]["node"]
+            demand = giant_tour[i]["demand"]
+
+            # Capacity check
+            if trip_demand + demand > truck_capacity:
                 break
 
-            d = dist_matrix[prev_dm, node + 1]
-            clock += d / speed * 60.0
-            clock += calc_service_time(giant_tour[j]["demand"])
+            # Time check: travel + wait + service + return to depot
+            travel = dist_matrix[prev_dm, node + 1] / speed * 60.0
+            arrive = clock + travel
+            tw_open = float(customers[node, COL_TW_OPEN])
+            if arrive < tw_open:
+                arrive = tw_open
+            service = calc_service_time(demand)
+            depot_return = dist_matrix[node + 1, 0] / speed * 60.0
 
-            return_time = dist_matrix[node + 1, 0] / speed * 60.0
-            if clock + return_time > DAY_LENGTH:
+            if arrive + service + depot_return > DAY_LENGTH:
                 break
 
-            # Distance cost for split graph
-            if j == i:
-                dist = dist_matrix[0, node + 1]
-            else:
-                dist = dist_matrix[0, giant_tour[i]["node"] + 1]
-                for k in range(i, j):
-                    dist += dist_matrix[giant_tour[k]["node"] + 1,
-                                        giant_tour[k + 1]["node"] + 1]
-            dist_with_return = dist + dist_matrix[node + 1, 0]
-
-            if cost[i] + dist_with_return < cost[j + 1]:
-                cost[j + 1] = cost[i] + dist_with_return
-                pred[j + 1] = i
-
+            # Add to trip
+            trip_stops.append(node)
+            action = ACT_RELOAD if giant_tour[i]["type"] == "satellite" else ACT_DELIVER
+            trip_actions.append(action)
+            trip_demand += demand
+            clock = arrive + service
             prev_dm = node + 1
+            i += 1
 
-    trips = backtrack_split(pred, n, giant_tour)
-
-    for t in trips:
-        t["total_distance"] = _compute_route_distance(t, dist_matrix)
+        if trip_stops:
+            trip = {
+                "stops": np.array(trip_stops, dtype=np.int32),
+                "actions": np.array(trip_actions, dtype=np.int8),
+                "total_demand": trip_demand,
+                "total_distance": _compute_route_distance(
+                    {"stops": np.array(trip_stops, dtype=np.int32)}, dist_matrix),
+            }
+            trips.append(trip)
+        else:
+            # Current stop can't fit in any trip alone — skip it
+            i += 1
 
     return trips

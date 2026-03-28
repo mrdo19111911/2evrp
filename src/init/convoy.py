@@ -2,7 +2,7 @@
 import numpy as np
 
 from ..data.constants import COL_DEMAND, COL_TW_CLOSE, ACT_DELIVER, ACT_RELOAD
-from ..data.cost import BIKE_SPEED_URBAN, BIKE_CAPACITY, DAY_LENGTH
+from ..data.cost import BIKE_SPEED_URBAN, TRUCK_SPEED_URBAN, BIKE_CAPACITY, DAY_LENGTH
 from .constraints import calc_service_time
 
 
@@ -63,12 +63,14 @@ def build_bike_trips_at_satellite(sat_node, customers_at_sat, n_bikes,
             arrival = trip_clock + travel
 
             if arrival > float(customers[best_node, COL_TW_CLOSE]):
-                remaining.remove(best_node)
-                continue
+                # Skip for this trip but don't remove from remaining —
+                # another bike starting earlier might still reach this customer
+                break
 
-            # Check can return to satellite after serving
+            # Check total time: serve + return to satellite + eventually return to depot
             return_to_sat = dist_matrix[best_node + 1, sat_node + 1] / speed * 60.0
-            if arrival + service + return_to_sat > DAY_LENGTH:
+            depot_return = dist_matrix[sat_node + 1, 0] / speed * 60.0
+            if arrival + service + return_to_sat + depot_return > DAY_LENGTH:
                 break
 
             trip_clock = arrival + service
@@ -91,7 +93,8 @@ def build_convoy_bike_routes(truck_trip, satellite_order, sat_customers,
     Each bike: depot -> [S1,RELOAD] -> custs -> [S2,RELOAD] -> custs -> ... -> depot
     Returns list of route dicts (1 per bike).
     """
-    speed = BIKE_SPEED_URBAN
+    bike_speed = BIKE_SPEED_URBAN
+    truck_speed = TRUCK_SPEED_URBAN
     # Initialize bike states
     bike_stops = [[] for _ in range(n_bikes)]
     bike_actions = [[] for _ in range(n_bikes)]
@@ -106,18 +109,18 @@ def build_convoy_bike_routes(truck_trip, satellite_order, sat_customers,
         custs_here = list(sat_customers.get(sat_node, []))
         if not custs_here:
             # Truck just passes through, no bike work
-            truck_clock += dist_matrix[truck_prev_dm, sat_node + 1] / speed * 60.0
+            truck_clock += dist_matrix[truck_prev_dm, sat_node + 1] / truck_speed * 60.0
             truck_clock += calc_service_time(float(customers[sat_node, COL_DEMAND]))
             truck_prev_dm = sat_node + 1
             continue
 
         # Truck arrives at satellite
-        truck_travel = dist_matrix[truck_prev_dm, sat_node + 1] / speed * 60.0
+        truck_travel = dist_matrix[truck_prev_dm, sat_node + 1] / truck_speed * 60.0
         truck_clock += truck_travel
 
         # Bikes travel to satellite
         for b in range(n_bikes):
-            bike_travel = dist_matrix[bike_prev_dm[b], sat_node + 1] / speed * 60.0
+            bike_travel = dist_matrix[bike_prev_dm[b], sat_node + 1] / bike_speed * 60.0
             bike_clocks[b] += bike_travel
             bike_prev_dm[b] = sat_node + 1
 
@@ -155,14 +158,18 @@ def build_convoy_bike_routes(truck_trip, satellite_order, sat_customers,
             # Next round starts when all bikes return to satellite
             # Bikes travel back to satellite
             for b in range(n_bikes):
-                back_travel = dist_matrix[bike_prev_dm[b], sat_node + 1] / speed * 60.0
+                back_travel = dist_matrix[bike_prev_dm[b], sat_node + 1] / bike_speed * 60.0
                 bike_clocks[b] += back_travel
                 bike_prev_dm[b] = sat_node + 1
 
             round_clock = max(bike_clocks)
 
-            # Check DAY_LENGTH — stop if too late
-            if round_clock > DAY_LENGTH * 0.9:
+            # Check DAY_LENGTH: any bike's total time (including depot return) > limit?
+            max_return = max(
+                bike_clocks[b] + dist_matrix[bike_prev_dm[b], 0] / bike_speed * 60.0
+                for b in range(n_bikes)
+            )
+            if max_return > DAY_LENGTH:
                 break
 
         # Truck service at satellite + wait for bikes
@@ -172,23 +179,22 @@ def build_convoy_bike_routes(truck_trip, satellite_order, sat_customers,
 
     # Pack routes
     routes = []
+    first_sat = satellite_order[0] if satellite_order else 0
     for b in range(n_bikes):
         if not bike_stops[b]:
             continue
+        # Find the first satellite this bike visited (first RELOAD stop)
+        bike_sat = first_sat
+        for k, act in enumerate(bike_actions[b]):
+            if act == ACT_RELOAD:
+                bike_sat = bike_stops[b][k]
+                break
         routes.append({
             "stops": np.array(bike_stops[b], dtype=np.int32),
             "actions": np.array(bike_actions[b], dtype=np.int8),
             "initial_load": 0.0,
-            "satellite_node": 0,
+            "satellite_node": bike_sat,
             "cluster_idx": 0,
             "bike_id": b,
         })
     return routes
-
-
-def _reassign_overflow(overflow, satellite_order, current_sat, sat_customers):
-    """Move overflow customers to next satellite in order."""
-    idx = satellite_order.index(current_sat)
-    if idx + 1 < len(satellite_order):
-        next_sat = satellite_order[idx + 1]
-        sat_customers.setdefault(next_sat, []).extend(overflow)
