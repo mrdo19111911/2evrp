@@ -1,149 +1,145 @@
-"""Tests for src/engine/validate.py — Data Model v2.
+"""Tests for src/engine/validate.py -- flat violation arrays. All i64.
 
-Unified arrays, transfers instead of satellites.
+New @njit signatures:
+- validate_delivery_uniqueness(truck_stops, truck_actions, truck_lengths,
+    bike_stops, bike_actions, bike_lengths, n_trucks, n_bikes, n_customers)
+- validate_vehicle_restrictions(truck_stops, truck_actions, truck_lengths,
+    n_trucks, customers)
 """
 import numpy as np
 import pytest
 
-from src.engine.validate import validate_delivery_uniqueness, validate_sync
-from src.data.constants import (
-    ACT_DELIVER, ACT_PICKUP, ACT_PAD,
-    ST_LOC, ST_ACTION, ST_CUMTIME, ST_SERVICE, ST_DEPART,
-    ST_LOAD_KG_BEF, ST_LOAD_KG_AFT, ST_FEASIBLE, ST_COLS,
-    TR_HUB, TR_BIKE, TR_TRUCK, TR_KG, TR_CBM, TR_TIME, TR_COLS,
-    ORD_LOC, ORD_QTY, ORD_UNIT_W, ORD_COLS,
+from src.engine.validate import (
+    validate_delivery_uniqueness, validate_vehicle_restrictions, validate_all,
 )
+from src.data.constants import ACT_DELIVER, ACT_RELOAD, ACT_PAD
 
 
-# ---------------------------------------------------------------------------
-# validate_delivery_uniqueness — unified arrays
-# ---------------------------------------------------------------------------
-
-def test_all_delivered_once(tiny_data):
+def test_all_delivered_once():
     """5 customers each delivered once -> valid."""
     n_cust = 5
-    n_veh = 3
     L = 4
-    orders = tiny_data["orders"]
 
-    stops = np.full((n_veh, L), -1, dtype=np.int32)
-    actions = np.full((n_veh, L), ACT_PAD, dtype=np.int8)
+    truck_stops = np.full((1, L), -1, dtype=np.int32)
+    truck_actions = np.full((1, L), ACT_PAD, dtype=np.int8)
+    truck_stops[0, 0] = 0; truck_actions[0, 0] = ACT_DELIVER
+    truck_stops[0, 1] = 1; truck_actions[0, 1] = ACT_DELIVER
+    truck_lengths = np.array([2], dtype=np.int32)
 
-    # Vehicle 0 (truck): C0, C1
-    stops[0, 0] = int(orders[0, ORD_LOC]); actions[0, 0] = ACT_DELIVER
-    stops[0, 1] = int(orders[1, ORD_LOC]); actions[0, 1] = ACT_DELIVER
+    bike_stops = np.full((2, L), -1, dtype=np.int32)
+    bike_actions = np.full((2, L), ACT_PAD, dtype=np.int8)
+    bike_stops[0, 0] = 2; bike_actions[0, 0] = ACT_DELIVER
+    bike_stops[0, 1] = 3; bike_actions[0, 1] = ACT_DELIVER
+    bike_stops[1, 0] = 4; bike_actions[1, 0] = ACT_DELIVER
+    bike_lengths = np.array([2, 1], dtype=np.int32)
 
-    # Vehicle 1 (bike 0): C2, C3
-    stops[1, 0] = int(orders[2, ORD_LOC]); actions[1, 0] = ACT_DELIVER
-    stops[1, 1] = int(orders[3, ORD_LOC]); actions[1, 1] = ACT_DELIVER
-
-    # Vehicle 2 (bike 1): C4
-    stops[2, 0] = int(orders[4, ORD_LOC]); actions[2, 0] = ACT_DELIVER
-
-    valid, unserved, duplicates = validate_delivery_uniqueness(
-        stops, actions, orders, n_cust,
-    )
-    assert valid is True
-    assert len(unserved) == 0
-    assert len(duplicates) == 0
+    unserved, n_unserved, n_dup = validate_delivery_uniqueness(
+        truck_stops, truck_actions, truck_lengths,
+        bike_stops, bike_actions, bike_lengths, 1, 2, n_cust)
+    assert n_unserved == 0
+    assert n_dup == 0
 
 
-def test_customer_missing(tiny_data):
+def test_customer_missing():
     """Customer 3 not delivered -> unserved."""
     n_cust = 5
-    n_veh = 2
     L = 3
-    orders = tiny_data["orders"]
 
-    stops = np.full((n_veh, L), -1, dtype=np.int32)
-    actions = np.full((n_veh, L), ACT_PAD, dtype=np.int8)
+    truck_stops = np.full((1, L), -1, dtype=np.int32)
+    truck_actions = np.full((1, L), ACT_PAD, dtype=np.int8)
+    truck_stops[0, 0] = 0; truck_actions[0, 0] = ACT_DELIVER
+    truck_stops[0, 1] = 1; truck_actions[0, 1] = ACT_DELIVER
+    truck_lengths = np.array([2], dtype=np.int32)
 
-    # V0: C0, C1
-    stops[0, 0] = int(orders[0, ORD_LOC]); actions[0, 0] = ACT_DELIVER
-    stops[0, 1] = int(orders[1, ORD_LOC]); actions[0, 1] = ACT_DELIVER
+    bike_stops = np.full((1, L), -1, dtype=np.int32)
+    bike_actions = np.full((1, L), ACT_PAD, dtype=np.int8)
+    bike_stops[0, 0] = 2; bike_actions[0, 0] = ACT_DELIVER
+    bike_stops[0, 1] = 4; bike_actions[0, 1] = ACT_DELIVER
+    bike_lengths = np.array([2], dtype=np.int32)
 
-    # V1: C2, C4 (C3 missing)
-    stops[1, 0] = int(orders[2, ORD_LOC]); actions[1, 0] = ACT_DELIVER
-    stops[1, 1] = int(orders[4, ORD_LOC]); actions[1, 1] = ACT_DELIVER
-
-    valid, unserved, duplicates = validate_delivery_uniqueness(
-        stops, actions, orders, n_cust,
-    )
-    assert valid is False
-    assert 3 in unserved
+    unserved, n_unserved, n_dup = validate_delivery_uniqueness(
+        truck_stops, truck_actions, truck_lengths,
+        bike_stops, bike_actions, bike_lengths, 1, 1, n_cust)
+    assert n_unserved > 0
+    assert 3 in unserved[:n_unserved]
 
 
-def test_customer_duplicate(tiny_data):
-    """Customer 2 delivered by both V0 and V1 -> duplicates."""
+def test_customer_duplicate():
+    """Customer 2 delivered by both truck and bike -> duplicates."""
     n_cust = 5
-    n_veh = 2
     L = 4
-    orders = tiny_data["orders"]
 
-    stops = np.full((n_veh, L), -1, dtype=np.int32)
-    actions = np.full((n_veh, L), ACT_PAD, dtype=np.int8)
+    truck_stops = np.full((1, L), -1, dtype=np.int32)
+    truck_actions = np.full((1, L), ACT_PAD, dtype=np.int8)
+    truck_stops[0, 0] = 0; truck_actions[0, 0] = ACT_DELIVER
+    truck_stops[0, 1] = 1; truck_actions[0, 1] = ACT_DELIVER
+    truck_stops[0, 2] = 2; truck_actions[0, 2] = ACT_DELIVER
+    truck_lengths = np.array([3], dtype=np.int32)
 
-    # V0: C0, C1, C2
-    stops[0, 0] = int(orders[0, ORD_LOC]); actions[0, 0] = ACT_DELIVER
-    stops[0, 1] = int(orders[1, ORD_LOC]); actions[0, 1] = ACT_DELIVER
-    stops[0, 2] = int(orders[2, ORD_LOC]); actions[0, 2] = ACT_DELIVER  # dup
+    bike_stops = np.full((1, L), -1, dtype=np.int32)
+    bike_actions = np.full((1, L), ACT_PAD, dtype=np.int8)
+    bike_stops[0, 0] = 2; bike_actions[0, 0] = ACT_DELIVER
+    bike_stops[0, 1] = 3; bike_actions[0, 1] = ACT_DELIVER
+    bike_stops[0, 2] = 4; bike_actions[0, 2] = ACT_DELIVER
+    bike_lengths = np.array([3], dtype=np.int32)
 
-    # V1: C2, C3, C4
-    stops[1, 0] = int(orders[2, ORD_LOC]); actions[1, 0] = ACT_DELIVER  # dup
-    stops[1, 1] = int(orders[3, ORD_LOC]); actions[1, 1] = ACT_DELIVER
-    stops[1, 2] = int(orders[4, ORD_LOC]); actions[1, 2] = ACT_DELIVER
-
-    valid, unserved, duplicates = validate_delivery_uniqueness(
-        stops, actions, orders, n_cust,
-    )
-    assert valid is False
-    assert 2 in duplicates
+    unserved, n_unserved, n_dup = validate_delivery_uniqueness(
+        truck_stops, truck_actions, truck_lengths,
+        bike_stops, bike_actions, bike_lengths, 1, 1, n_cust)
+    assert n_dup > 0
 
 
-def test_pickup_not_counted(tiny_data):
-    """PICKUP at a location does not count as delivery."""
+def test_reload_not_counted():
+    """RELOAD at a location does not count as delivery."""
     n_cust = 5
-    n_veh = 2
     L = 4
-    orders = tiny_data["orders"]
 
-    stops = np.full((n_veh, L), -1, dtype=np.int32)
-    actions = np.full((n_veh, L), ACT_PAD, dtype=np.int8)
+    truck_stops = np.full((1, L), -1, dtype=np.int32)
+    truck_actions = np.full((1, L), ACT_PAD, dtype=np.int8)
+    truck_stops[0, 0] = 0; truck_actions[0, 0] = ACT_DELIVER
+    truck_stops[0, 1] = 1; truck_actions[0, 1] = ACT_DELIVER
+    truck_stops[0, 2] = 2; truck_actions[0, 2] = ACT_RELOAD
+    truck_lengths = np.array([3], dtype=np.int32)
 
-    # V0: C0(deliver), C1(deliver), C2_loc(PICKUP)
-    stops[0, 0] = int(orders[0, ORD_LOC]); actions[0, 0] = ACT_DELIVER
-    stops[0, 1] = int(orders[1, ORD_LOC]); actions[0, 1] = ACT_DELIVER
-    stops[0, 2] = int(orders[2, ORD_LOC]); actions[0, 2] = ACT_PICKUP  # not delivery
+    bike_stops = np.full((1, L), -1, dtype=np.int32)
+    bike_actions = np.full((1, L), ACT_PAD, dtype=np.int8)
+    bike_stops[0, 0] = 2; bike_actions[0, 0] = ACT_DELIVER
+    bike_stops[0, 1] = 3; bike_actions[0, 1] = ACT_DELIVER
+    bike_stops[0, 2] = 4; bike_actions[0, 2] = ACT_DELIVER
+    bike_lengths = np.array([3], dtype=np.int32)
 
-    # V1: C2(deliver), C3(deliver), C4(deliver)
-    stops[1, 0] = int(orders[2, ORD_LOC]); actions[1, 0] = ACT_DELIVER
-    stops[1, 1] = int(orders[3, ORD_LOC]); actions[1, 1] = ACT_DELIVER
-    stops[1, 2] = int(orders[4, ORD_LOC]); actions[1, 2] = ACT_DELIVER
-
-    valid, unserved, duplicates = validate_delivery_uniqueness(
-        stops, actions, orders, n_cust,
-    )
-    assert valid is True
-    assert len(unserved) == 0
-    assert len(duplicates) == 0
+    unserved, n_unserved, n_dup = validate_delivery_uniqueness(
+        truck_stops, truck_actions, truck_lengths,
+        bike_stops, bike_actions, bike_lengths, 1, 1, n_cust)
+    assert n_unserved == 0
+    assert n_dup == 0
 
 
-# ---------------------------------------------------------------------------
-# validate_sync — transfer-based
-# ---------------------------------------------------------------------------
+def test_restriction_violation(tiny_instance):
+    """Restricted customer 2 on truck -> violation."""
+    L = 3
+    truck_stops = np.full((1, L), -1, dtype=np.int32)
+    truck_actions = np.full((1, L), ACT_PAD, dtype=np.int8)
+    truck_stops[0, 0] = 2; truck_actions[0, 0] = ACT_DELIVER
+    truck_lengths = np.array([1], dtype=np.int32)
 
-def test_sync_valid(tiny_data):
-    """Transfer with states within delta_t -> valid."""
-    delta_t = 15.0
-    n_veh = tiny_data["n_vehicles"]
+    vr_viol, n_vr = validate_vehicle_restrictions(
+        truck_stops, truck_actions, truck_lengths, 1,
+        tiny_instance["customers"])
+    assert n_vr >= 1
+    assert 2 in vr_viol[:n_vr]
 
-    # Build minimal states: one row per vehicle
-    states = []
-    for v in range(n_veh):
-        row = np.zeros((0, ST_COLS), dtype=np.float64)
-        states.append(row)
 
-    transfers = np.empty((0, TR_COLS), dtype=np.float64)
-    valid, violations = validate_sync(states, transfers, delta_t)
-    assert valid is True
-    assert len(violations) == 0
+def test_restriction_ok(tiny_instance):
+    """Non-restricted customers on truck -> ok."""
+    L = 3
+    truck_stops = np.full((1, L), -1, dtype=np.int32)
+    truck_actions = np.full((1, L), ACT_PAD, dtype=np.int8)
+    truck_stops[0, 0] = 0; truck_actions[0, 0] = ACT_DELIVER
+    truck_stops[0, 1] = 1; truck_actions[0, 1] = ACT_DELIVER
+    truck_lengths = np.array([2], dtype=np.int32)
+
+    vr_viol, n_vr = validate_vehicle_restrictions(
+        truck_stops, truck_actions, truck_lengths, 1,
+        tiny_instance["customers"])
+    assert n_vr == 0

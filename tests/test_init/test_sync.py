@@ -1,67 +1,53 @@
-"""Tests for src/init/sync.py — Data Model v2."""
+"""Tests for src/init/sync.py -- time synchronization.
+
+All units: meters (i64), seconds (i64), grams (i64).
+"""
 import numpy as np
 import pytest
 
 from src.init.sync import synchronize_times
-from src.data.constants import (
-    ACT_DELIVER, ACT_PICKUP,
-    ORD_LOC, ORD_QTY, ORD_UNIT_W, ORD_COLS,
-    LOC_X, LOC_Y, LOC_UNLOAD_RATE, LOC_BASE_SVC, LOC_COLS,
-    LTYPE_DEPOT, LTYPE_CUSTOMER,
-    VEH_TYPE, VEH_CAP_KG, VEH_COLS, VTYPE_TRUCK, VTYPE_BIKE,
-    TR_COLS,
+from src.data.constants import ACT_DELIVER, ACT_RELOAD, COL_DEMAND
+from src.data.cost import (
+    TRUCK_COST_PER_M, BIKE_COST_PER_M,
+    TRUCK_SPEED_US_PER_M, BIKE_SPEED_US_PER_M,
+    TRUCK_CAPACITY_G, BIKE_CAPACITY_G,
 )
-from src.solution.structure import create_solution
 
 
-def _make_locations(coords, depot_xy=(0.0, 0.0)):
-    n = 1 + len(coords)
-    locs = np.zeros((n, LOC_COLS), dtype=np.float64)
-    locs[0] = [depot_xy[0], depot_xy[1], LTYPE_DEPOT, 99999.0, 20.0, 10.0]
-    for i, (x, y) in enumerate(coords):
-        locs[i + 1] = [x, y, LTYPE_CUSTOMER, 99999.0, 20.0, 5.0]
-    return locs
-
-
-def _build_dm(locations, speed=25.0):
-    coords = locations[:, :2]
-    n = len(coords)
-    diff = coords[:, None, :] - coords[None, :, :]
-    dk = np.sqrt((diff ** 2).sum(axis=2))
-    tm = dk / speed * 60.0
-    return np.stack([dk, tm], axis=0)
+def _simple_dist_matrix(coords_with_depot):
+    coords_f = coords_with_depot.astype(np.float64)
+    diff = coords_f[:, None, :] - coords_f[None, :, :]
+    return np.round(np.sqrt((diff ** 2).sum(axis=2))).astype(np.int64)
 
 
 # ---------------------------------------------------------------------------
-# synchronize_times — integration
+# synchronize_times -- integration
 # ---------------------------------------------------------------------------
 
-def test_synchronize_times_basic(tiny_data):
-    """synchronize_times returns valid transfers array."""
-    sol = create_solution(tiny_data["n_vehicles"], tiny_data["n_customers"],
-                          n_sku=tiny_data["n_sku"])
-    orders = tiny_data["orders"]
-    vehicles = tiny_data["vehicles"]
-    dm = tiny_data["dist_matrix"]
-    loc_to_cust = tiny_data["loc_to_cust"]
-    max_wt = tiny_data["max_working_time"]
+def test_synchronize_times_basic(tiny_instance):
+    """synchronize_times returns valid satellites ndarray."""
+    data = tiny_instance
+    customers = data["customers"]
+    vehicles = data["vehicles"]
+    depot = data["depot"]
+    coords = np.vstack([depot.reshape(1, 2), customers[:, :2]])
+    dm = _simple_dist_matrix(coords)
 
-    # Build a minimal route: truck delivers C0, pickup at C1 location
-    sol["stops"][0, 0] = int(orders[0, ORD_LOC])
-    sol["actions"][0, 0] = ACT_DELIVER
-    sol["stops"][0, 1] = int(orders[1, ORD_LOC])
-    sol["actions"][0, 1] = ACT_PICKUP
-    sol["lengths"][0] = 2
+    # Build minimal truck route: C0 (deliver), C1 (reload)
+    truck_sol = [
+        {"stops": np.array([0, 1], dtype=np.int32),
+         "actions": np.array([ACT_DELIVER, ACT_RELOAD], dtype=np.int8),
+         "total_demand": 100000, "total_distance": 10000,
+         "truck_id": 0},
+    ]
+    # Bike route: C2 (deliver), C1 (reload)
+    bike_sol = [
+        {"stops": np.array([2, 1], dtype=np.int32),
+         "actions": np.array([ACT_DELIVER, ACT_RELOAD], dtype=np.int8),
+         "total_demand": 10000, "total_distance": 5000,
+         "bike_id": 0},
+    ]
 
-    # Bike delivers C2, pickup at C1 location
-    sol["stops"][1, 0] = int(orders[2, ORD_LOC])
-    sol["actions"][1, 0] = ACT_DELIVER
-    sol["stops"][1, 1] = int(orders[1, ORD_LOC])
-    sol["actions"][1, 1] = ACT_PICKUP
-    sol["lengths"][1] = 2
-
-    locations = tiny_data["locations"]
-    result = synchronize_times(sol, orders, locations, vehicles, dm, loc_to_cust, max_wt)
+    result = synchronize_times(truck_sol, bike_sol, customers, dm, vehicles)
     assert isinstance(result, np.ndarray)
     assert result.ndim == 2
-    assert result.shape[1] == TR_COLS

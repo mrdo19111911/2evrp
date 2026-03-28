@@ -1,82 +1,105 @@
-"""Penalty computation from constraint violations."""
-from src.data.constants import COL_DEMAND
+"""Penalty computation from constraint violations. All i64. @njit."""
+import numpy as np
+from numba import njit
+
+from src.data.constants import (
+    COL_DEMAND, VCOL_CAPACITY, VCOL_COST_M, VCOL_SPEED,
+    PW_UNSERVED, PW_DUPLICATE, PW_CAPACITY, PW_TIME_WINDOW,
+    PW_SYNC, PW_VEHICLE_RESTRICTION,
+)
 from src.data.cost import (
-    TRUCK_CAPACITY, BIKE_CAPACITY,
+    TRUCK_CAPACITY_G, BIKE_CAPACITY_G,
     TRUCK_FIXED_DAY, BIKE_FIXED_DAY,
-    BIKE_TOTAL_KM, BIKE_DRIVER_HOUR, BIKE_DEPLOY_COST, BIKE_SPEED_URBAN,
-    PENALTY_OVERLOAD_PER_PCT, PENALTY_UNSERVED_MULTIPLIER,
+    BIKE_COST_PER_M, BIKE_DRIVER_SEC, BIKE_DEPLOY_COST,
+    BIKE_SPEED_US_PER_M,
+    PENALTY_UNSERVED_MULTIPLIER,
+    PENALTY_OVERLOAD_PER_PCT,
+    PENALTY_OVERTIME,
     DAY_LENGTH,
-    SERVICE_BASE, SERVICE_PER_100KG,
 )
 
 
-def calc_unserved_penalty(customer_idx, customers, dist_matrix):
-    """Distance-weighted penalty: far from depot = HIGH, near = LOW.
-
-    Real-world logic: near-depot customers are easy to serve by other means
-    (walk-in, next-day, partner). Far customers are the whole reason the fleet
-    exists. Dropping a far customer is 10x worse than dropping a near one.
-
-    penalty = base_cost * distance_multiplier
-    distance_multiplier = (dist / max_dist)^2 * 9 + 1  → range [1, 10]
-    """
+@njit(cache=True)
+def calc_unserved_penalty(customer_idx, customers, dist_matrix, max_dist_m, vehicles):
+    """Distance-weighted penalty per unserved customer. All i64."""
     d = dist_matrix[0, customer_idx + 1]
-    distance = 2.0 * d
-    travel_min = distance / BIKE_SPEED_URBAN * 60.0
-    demand = customers[customer_idx, COL_DEMAND]
-    service_min = SERVICE_BASE + SERVICE_PER_100KG * (demand / 100.0)
-    total_min = travel_min + service_min
+    distance_m = np.int64(2) * d
+    travel_s = distance_m * np.int64(BIKE_SPEED_US_PER_M) // np.int64(1_000_000)
+    service_s = customers[customer_idx, 5]  # COL_SERVICE
+    total_s = travel_s + service_s
 
-    base_cost = (distance * BIKE_TOTAL_KM
-                 + total_min / 60.0 * BIKE_DRIVER_HOUR
-                 + BIKE_DEPLOY_COST)
+    base_cost = (distance_m * np.int64(BIKE_COST_PER_M)
+                 + total_s * np.int64(BIKE_DRIVER_SEC)
+                 + np.int64(BIKE_DEPLOY_COST))
 
-    # Distance multiplier: far = 10x penalty, near = 1x
-    max_dist = float(dist_matrix[0, 1:].max()) if dist_matrix.shape[1] > 1 else 1.0
-    ratio = min(d / max(max_dist, 1.0), 1.0)
-    distance_multiplier = ratio * ratio * 9.0 + 1.0  # [1, 10]
+    # distance_multiplier: ratio^2 * 9 + 1, using integer approx
+    # ratio = d / max_dist (0..1), ratio^2 * 9 + 1 in [1..10]
+    # Use fixed-point: ratio_1000 = d * 1000 / max_dist
+    safe_max = max(max_dist_m, np.int64(1))
+    ratio_1000 = d * np.int64(1000) // safe_max
+    # multiplier_1000 = ratio^2 * 9000 / 1000 + 1000
+    multiplier_1000 = ratio_1000 * ratio_1000 * np.int64(9) // np.int64(1000) + np.int64(1000)
 
-    return PENALTY_UNSERVED_MULTIPLIER * base_cost * distance_multiplier
+    penalty = np.int64(PENALTY_UNSERVED_MULTIPLIER) * base_cost * multiplier_1000 // np.int64(1000)
+    return penalty
 
 
-def compute_penalties(report, penalty_weights, customers=None, dist_matrix=None):
-    """Total penalty from violations. Returns (total, breakdown)."""
-    breakdown = {}
+@njit(cache=True)
+def compute_penalties(unserved, n_unserved, n_duplicates,
+                      cap_viol, n_cap, tw_viol, n_tw,
+                      sync_viol, n_sync, n_vr,
+                      return_times, n_return_times,
+                      penalty_w, customers, dist_matrix, vehicles):
+    """Total penalty (i64). Returns (total, parts i64[7])."""
+    parts = np.zeros(7, dtype=np.int64)
 
-    unserved = report["delivery_uniqueness"]["unserved"]
-    if len(unserved) > 0 and customers is not None and dist_matrix is not None:
-        breakdown["unserved"] = sum(
-            calc_unserved_penalty(int(c), customers, dist_matrix) for c in unserved)
-    else:
-        breakdown["unserved"] = len(unserved) * penalty_weights["unserved"]
+    # Unserved
+    if n_unserved > 0:
+        max_dist_m = np.int64(1)
+        for j in range(1, dist_matrix.shape[1]):
+            if dist_matrix[0, j] > max_dist_m:
+                max_dist_m = dist_matrix[0, j]
+        for i in range(n_unserved):
+            parts[0] += calc_unserved_penalty(unserved[i], customers, dist_matrix, max_dist_m, vehicles)
 
-    breakdown["duplicate"] = len(report["delivery_uniqueness"]["duplicates"]) * penalty_weights["duplicate"]
+    # Duplicates
+    parts[1] = np.int64(n_duplicates) * penalty_w[PW_DUPLICATE]
 
-    cap_penalty = 0.0
-    for (vtype, vid, stop_idx, load) in report["capacity"]["violations"]:
-        if vtype == "bike":
-            cap, fixed = BIKE_CAPACITY, BIKE_FIXED_DAY
+    # Capacity
+    for i in range(n_cap):
+        vtype = cap_viol[i, 0]
+        load = cap_viol[i, 3]
+        if vtype == 1:
+            cap = np.int64(BIKE_CAPACITY_G)
+            fixed = np.int64(BIKE_FIXED_DAY)
         else:
-            cap, fixed = TRUCK_CAPACITY, TRUCK_FIXED_DAY
-        overload_pct = max(0.0, (load - cap) / cap * 100.0)
-        cap_penalty += overload_pct * fixed * PENALTY_OVERLOAD_PER_PCT
-    breakdown["capacity"] = cap_penalty
+            cap = np.int64(TRUCK_CAPACITY_G)
+            fixed = np.int64(TRUCK_FIXED_DAY)
+        if load > cap and cap > 0:
+            overload_pct_x100 = (load - cap) * np.int64(10000) // cap
+            parts[2] += overload_pct_x100 * fixed * np.int64(PENALTY_OVERLOAD_PER_PCT) // np.int64(10000)
 
-    tw_violations = report["time_windows"]["violations"]
-    tw_penalty = sum(arrive - tw_close for (_, _, _, arrive, tw_close) in tw_violations) * penalty_weights["time_window"]
-    breakdown["time_window"] = tw_penalty
+    # Time windows
+    for i in range(n_tw):
+        arrive = tw_viol[i, 3]
+        tw_close = tw_viol[i, 4]
+        late_s = max(np.int64(0), arrive - tw_close)
+        parts[3] += late_s * penalty_w[PW_TIME_WINDOW]
 
-    breakdown["sync"] = len(report["sync"]["violations"]) * penalty_weights["sync"]
-    breakdown["vehicle_restriction"] = len(report["vehicle_restrictions"]["violations"]) * penalty_weights["vehicle_restriction"]
+    # Sync
+    parts[4] = np.int64(n_sync) * penalty_w[PW_SYNC]
 
-    # Overtime = depot TW violation. Same rate as customer TW.
-    # DAY_LENGTH is the depot's tw_close.
-    overtime_penalty = 0.0
-    for rt in report.get("return_times", []):
-        overtime = max(0.0, rt - DAY_LENGTH)
-        if overtime > 0:
-            overtime_penalty += overtime * penalty_weights["time_window"]
-    breakdown["overtime"] = overtime_penalty
+    # Vehicle restriction
+    parts[5] = np.int64(n_vr) * penalty_w[PW_VEHICLE_RESTRICTION]
 
-    total = sum(breakdown.values())
-    return total, breakdown
+    # Overtime
+    day = np.int64(DAY_LENGTH)
+    for i in range(n_return_times):
+        overtime_s = max(np.int64(0), return_times[i] - day)
+        if overtime_s > 0:
+            parts[6] += overtime_s * np.int64(PENALTY_OVERTIME)
+
+    total = np.int64(0)
+    for i in range(7):
+        total += parts[i]
+    return total, parts

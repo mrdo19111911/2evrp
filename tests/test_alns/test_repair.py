@@ -1,137 +1,79 @@
-"""Tests for repair operators (src/alns/repair.py) — Data Model v2."""
+"""Tests for repair operators (src/alns/repair.py). i64 interface.
+Repair signature: (sol, removed, customers_i64, dist_matrix_i64, vehicles_i64, seed_int, config_f64)
+No restricted param.
+"""
 import numpy as np
 import pytest
 
-from src.alns.repair import (
-    greedy_insertion,
-    regret_k_insertion,
-    transfer_aware_insertion,
-    REPAIR_OPS,
-)
-from src.alns.destroy import random_removal
+from src.alns.repair import repair_dispatch
+from src.alns.repair_ops import greedy_insertion, regret_k_insertion
+from src.alns.destroy_basic import random_removal
+from src.alns.config import make_config
 from src.solution.structure import copy_solution
-
-
-def _remove_customers_v2(sol, to_remove):
-    """Manually unassign customers from unified solution."""
-    from src.data.constants import ACT_DELIVER, ACT_PAD
-    for c in to_remove:
-        vid = sol["cust_vehicle"][c]
-        pos = sol["cust_route_pos"][c]
-        if vid < 0:
-            continue
-        # Clear stop
-        sol["stops"][vid, pos] = -1
-        sol["actions"][vid, pos] = ACT_PAD
-        # Compact route (shift left)
-        L = sol["lengths"][vid]
-        for j in range(pos, L - 1):
-            sol["stops"][vid, j] = sol["stops"][vid, j + 1]
-            sol["actions"][vid, j] = sol["actions"][vid, j + 1]
-            sc = sol["stops"][vid, j]
-            if sc >= 0 and sol["actions"][vid, j] == ACT_DELIVER:
-                # Find customer for this location
-                pass  # simplified; rely on rebuild
-        sol["stops"][vid, L - 1] = -1
-        sol["actions"][vid, L - 1] = ACT_PAD
-        sol["lengths"][vid] -= 1
-        sol["cust_vehicle"][c] = -1
-        sol["cust_route_pos"][c] = -1
+from src.data.constants import (
+    SOL_CUST_VEHICLE, CFG_Q_MIN, CFG_Q_MAX, CFG_REGRET_K,
+)
 
 
 # ---------------------------------------------------------------------------
-# greedy_insertion
+# greedy_insertion — no restricted param
 # ---------------------------------------------------------------------------
 
-def test_greedy_all_reinserted(sol_10_assigned, default_params):
-    """Remove 3, greedy insert -> all re-assigned."""
-    bundle = sol_10_assigned
+def test_greedy_all_reinserted(sol_5_assigned):
+    bundle = sol_5_assigned
     sol = copy_solution(bundle["sol"])
-    data = bundle["data"]
-    rng = np.random.default_rng(0)
+    config = make_config(bundle["N"], overrides={CFG_Q_MIN: 1, CFG_Q_MAX: 3})
 
-    # Use destroy operator to remove
-    removed = random_removal(sol, data, rng, default_params)
-    assert len(removed) >= 3
+    removed = random_removal(sol, bundle["customers"], bundle["dist_matrix"],
+                             0, config)
+    assert len(removed) >= 1
 
-    greedy_insertion(sol, removed, data, np.random.default_rng(1), default_params)
+    greedy_insertion(sol, removed, bundle["customers"],
+                     bundle["dist_matrix"], bundle["vehicles"],
+                     1, config)
     for c in removed:
-        assert sol["cust_vehicle"][c] >= 0, f"C{c} not reinserted"
+        assert sol[SOL_CUST_VEHICLE][c] >= 0, f"C{c} not reinserted"
 
 
-def test_greedy_preserves_assigned(sol_10_assigned, default_params):
-    """After reinserting, every customer assigned."""
-    bundle = sol_10_assigned
+def test_greedy_preserves_assigned(sol_5_assigned):
+    bundle = sol_5_assigned
     sol = copy_solution(bundle["sol"])
-    data = bundle["data"]
-    rng = np.random.default_rng(42)
+    config = make_config(bundle["N"], overrides={CFG_Q_MIN: 1, CFG_Q_MAX: 2})
 
-    removed = random_removal(sol, data, rng, default_params)
-    greedy_insertion(sol, removed, data, np.random.default_rng(7), default_params)
+    removed = random_removal(sol, bundle["customers"], bundle["dist_matrix"],
+                             42, config)
+    greedy_insertion(sol, removed, bundle["customers"],
+                     bundle["dist_matrix"], bundle["vehicles"],
+                     7, config)
 
     for c in range(bundle["N"]):
-        assert sol["cust_vehicle"][c] >= 0, f"C{c} unassigned after repair"
+        assert sol[SOL_CUST_VEHICLE][c] >= 0, f"C{c} unassigned after repair"
 
 
 # ---------------------------------------------------------------------------
-# regret_k_insertion
+# regret_k_insertion — no restricted param
 # ---------------------------------------------------------------------------
 
-def test_regret_all_reinserted(sol_10_assigned, default_params):
-    """Remove some, regret-k insert -> all re-assigned."""
-    bundle = sol_10_assigned
+def test_regret_all_reinserted(sol_5_assigned):
+    bundle = sol_5_assigned
     sol = copy_solution(bundle["sol"])
-    data = bundle["data"]
-    rng = np.random.default_rng(0)
+    config = make_config(bundle["N"], overrides={
+        CFG_Q_MIN: 1, CFG_Q_MAX: 2, CFG_REGRET_K: 3,
+    })
 
-    removed = random_removal(sol, data, rng, default_params)
-    params = {**default_params, "regret_k": 3}
-    regret_k_insertion(sol, removed, data, np.random.default_rng(7), params)
+    removed = random_removal(sol, bundle["customers"], bundle["dist_matrix"],
+                             0, config)
+    regret_k_insertion(sol, removed, bundle["customers"],
+                       bundle["dist_matrix"], bundle["vehicles"],
+                       7, config)
 
     for c in removed:
-        assert sol["cust_vehicle"][c] >= 0, f"C{c} not reinserted"
-
-
-# ---------------------------------------------------------------------------
-# transfer_aware_insertion
-# ---------------------------------------------------------------------------
-
-def test_transfer_aware_with_event(sol_with_transfer, default_params):
-    """Transfer exists -> transfer_aware_insertion works."""
-    bundle = sol_with_transfer
-    sol = copy_solution(bundle["sol"])
-    data = bundle["data"]
-    rng = np.random.default_rng(0)
-
-    removed = random_removal(sol, data, rng, {**default_params, "q_min": 1, "q_max": 2})
-    if len(removed) > 0:
-        transfer_aware_insertion(sol, removed, data, np.random.default_rng(1), default_params)
-        for c in removed:
-            assert sol["cust_vehicle"][c] >= 0, f"C{c} not reinserted"
-
-
-def test_transfer_aware_no_transfers(sol_10_assigned, default_params):
-    """No transfers -> falls back to greedy."""
-    bundle = sol_10_assigned
-    sol = copy_solution(bundle["sol"])
-    data = bundle["data"]
-    rng = np.random.default_rng(0)
-
-    removed = random_removal(sol, data, rng, default_params)
-    transfer_aware_insertion(sol, removed, data, np.random.default_rng(1), default_params)
-    for c in removed:
-        assert sol["cust_vehicle"][c] >= 0, f"C{c} not reinserted"
+        assert sol[SOL_CUST_VEHICLE][c] >= 0, f"C{c} not reinserted"
 
 
 # ---------------------------------------------------------------------------
 # REPAIR_OPS list
 # ---------------------------------------------------------------------------
 
-def test_repair_ops_length():
-    assert len(REPAIR_OPS) == 3
-
-
-def test_repair_ops_names():
-    names = {f.__name__ for f in REPAIR_OPS}
-    expected = {"greedy_insertion", "regret_k_insertion", "transfer_aware_insertion"}
-    assert names == expected
+def test_repair_dispatch_callable():
+    assert callable(repair_dispatch)

@@ -1,58 +1,82 @@
-"""Random and clustered test instance generation."""
+"""Random and clustered test instance generation. All outputs i64."""
 import numpy as np
 
+from .constants import CUST_COLS, kmh_to_us_per_m
+from .cost import (
+    TRUCK_COST_PER_M, BIKE_COST_PER_M,
+    TRUCK_SPEED_US_PER_M, BIKE_SPEED_US_PER_M,
+    TRUCK_CAPACITY_G, BIKE_CAPACITY_G,
+)
+from .io import SERVICE_BASE_S, SERVICE_PER_G
 
-def generate_random_instance(n_customers, n_trucks, n_bikes, area_size=50.0,
-                             demand_range=(3.0, 120.0), seed=42):
-    """Generate random instance. Returns (customers, restricted, depot, vehicles)."""
+
+def generate_random_instance(n_customers, n_trucks, n_bikes,
+                             area_size_m=50000, demand_range_g=(3000, 120000),
+                             seed=42):
+    """Generate random instance. Returns (customers_i64, depot_i64, vehicles_i64)."""
     rng = np.random.default_rng(seed)
-    depot = np.array([area_size / 2, area_size / 2], dtype=np.float64)
-    customers = _make_customers(rng, n_customers, area_size, demand_range)
+    depot = np.array([area_size_m // 2, area_size_m // 2], dtype=np.int64)
+    customers = _make_customers(rng, n_customers, area_size_m, demand_range_g)
     restricted = _make_restricted(rng, n_customers, frac=0.15)
+    customers[:, 6] = restricted
     vehicles = _make_vehicles(n_trucks, n_bikes)
-    return customers, restricted, depot, vehicles
+    return customers, depot, vehicles
 
 
-def generate_clustered_instance(n_customers, n_trucks, n_bikes, n_clusters=5,
-                                cluster_std=3.0, area_size=50.0, seed=42):
-    """Generate clustered instance. Returns (customers, restricted, depot, vehicles)."""
+def generate_clustered_instance(n_customers, n_trucks, n_bikes,
+                                n_clusters=5, cluster_std_m=3000,
+                                area_size_m=50000, seed=42):
+    """Generate clustered instance. Returns (customers_i64, depot_i64, vehicles_i64)."""
     rng = np.random.default_rng(seed)
-    depot = np.array([area_size / 2, area_size / 2], dtype=np.float64)
+    depot = np.array([area_size_m // 2, area_size_m // 2], dtype=np.int64)
 
-    centers = rng.uniform(cluster_std, area_size - cluster_std, (n_clusters, 2))
+    centers = rng.integers(cluster_std_m, area_size_m - cluster_std_m,
+                           (n_clusters, 2))
     labels = rng.integers(0, n_clusters, n_customers)
-    xy = centers[labels] + rng.normal(0, cluster_std, (n_customers, 2))
-    xy = np.clip(xy, 0.0, area_size)
+    xy_f = centers[labels].astype(np.float64) + rng.normal(
+        0, cluster_std_m, (n_customers, 2))
+    xy = np.clip(xy_f, 0, area_size_m).astype(np.int64)
 
-    customers = _make_customers_from_xy(rng, xy, demand_range=(3.0, 120.0))
+    customers = _make_customers_from_xy(rng, xy, demand_range_g=(3000, 120000))
     restricted = _make_restricted(rng, n_customers, frac=0.15)
+    customers[:, 6] = restricted
     vehicles = _make_vehicles(n_trucks, n_bikes)
-    return customers, restricted, depot, vehicles
+    return customers, depot, vehicles
 
 
 # --- Internal helpers ---
 
-def _make_customers(rng, n, area_size, demand_range):
-    xy = rng.uniform(0, area_size, (n, 2))
-    return _make_customers_from_xy(rng, xy, demand_range)
+def _make_customers(rng, n, area_size_m, demand_range_g):
+    xy = rng.integers(0, area_size_m, (n, 2))
+    return _make_customers_from_xy(rng, xy, demand_range_g)
 
 
-def _make_customers_from_xy(rng, xy, demand_range, day_length=480.0):
+def _make_customers_from_xy(rng, xy, demand_range_g, day_length_s=28800):
     n = len(xy)
-    demands = rng.uniform(demand_range[0], demand_range[1], n)
-    tw_open = rng.uniform(0, day_length * 0.7, n)
-    tw_width = rng.uniform(30.0, 180.0, n)
-    tw_close = np.minimum(tw_open + tw_width, day_length)
-    # Ensure tw_open < tw_close (min width 1 minute)
-    tight = tw_close - tw_open < 1.0
-    tw_close[tight] = tw_open[tight] + 1.0
-    service = np.where(demands > 60, 15.0, 5.0)
-    customers = np.column_stack([xy, demands, tw_open, tw_close, service])
-    return customers.astype(np.float64)
+    out = np.zeros((n, CUST_COLS), dtype=np.int64)
+    out[:, 0] = xy[:, 0]
+    out[:, 1] = xy[:, 1]
+
+    demands_g = rng.integers(demand_range_g[0], demand_range_g[1], n)
+    out[:, 2] = demands_g
+
+    tw_open_s = rng.integers(0, int(day_length_s * 0.7), n)
+    tw_width_s = rng.integers(1800, 10800, n)
+    tw_close_s = np.minimum(tw_open_s + tw_width_s, day_length_s)
+    tight = tw_close_s - tw_open_s < 60
+    tw_close_s[tight] = tw_open_s[tight] + 60
+    out[:, 3] = tw_open_s
+    out[:, 4] = tw_close_s
+
+    for i in range(n):
+        out[i, 5] = int(SERVICE_BASE_S + SERVICE_PER_G * demands_g[i])
+
+    out[:, 6] = 0  # restricted filled by caller
+    return out
 
 
 def _make_restricted(rng, n, frac=0.15):
-    restricted = np.zeros(n, dtype=np.int8)
+    restricted = np.zeros(n, dtype=np.int64)
     k = max(1, int(n * frac))
     idx = rng.choice(n, size=k, replace=False)
     restricted[idx] = 1
@@ -62,7 +86,9 @@ def _make_restricted(rng, n, frac=0.15):
 def _make_vehicles(n_trucks, n_bikes):
     rows = []
     for _ in range(n_trucks):
-        rows.append([0, 2000.0, 4.52, 25.0])
+        rows.append([0, TRUCK_CAPACITY_G, TRUCK_COST_PER_M,
+                     TRUCK_SPEED_US_PER_M])
     for _ in range(n_bikes):
-        rows.append([1, 60.0, 0.85, 20.0])
-    return np.array(rows, dtype=np.float64)
+        rows.append([1, BIKE_CAPACITY_G, BIKE_COST_PER_M,
+                     BIKE_SPEED_US_PER_M])
+    return np.array(rows, dtype=np.int64)

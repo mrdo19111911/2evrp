@@ -1,4 +1,4 @@
-"""Tests for single-route operations — Data Model v2."""
+"""Tests for single-route operations -- tuple-based solution. All i64."""
 import numpy as np
 import pytest
 
@@ -10,178 +10,183 @@ from src.solution.route_ops import (
     reverse_segment,
 )
 from src.data.constants import (
-    ACT_DELIVER, ACT_PICKUP, ACT_PAD,
-    VTYPE_TRUCK, VTYPE_BIKE,
-    ORD_LOC, ORD_QTY, ORD_UNIT_W,
-    DM_DIST,
+    ACT_DELIVER, ACT_RELOAD, ACT_PAD, VEH_TRUCK, VEH_BIKE, COL_DEMAND,
+    SOL_TRUCK_STOPS, SOL_TRUCK_ACTIONS, SOL_TRUCK_LENGTHS,
+    SOL_BIKE_STOPS, SOL_BIKE_ACTIONS, SOL_BIKE_LENGTHS,
+    SOL_TRUCK_DISTANCES, SOL_BIKE_DISTANCES,
+    SOL_CUST_VEHICLE, SOL_CUST_VTYPE, SOL_CUST_ROUTE_POS,
 )
-
-
-def _make_sol(data):
-    return create_solution(data["n_vehicles"], data["n_customers"],
-                           n_sku=data["n_sku"])
-
-
-def _ins(sol, v, pos, customer, data, action=ACT_DELIVER):
-    orders = data["orders"]
-    loc_id = int(orders[customer, ORD_LOC])
-    insert_stop(sol, v, pos, loc_id, action, data["dist_matrix"],
-                data["vehicles"], orders, customer=customer if action == ACT_DELIVER else -1)
-
-
-def _loc(data, customer):
-    return int(data["orders"][customer, ORD_LOC])
-
-
-def _demand(data, customer):
-    o = data["orders"]
-    return o[customer, ORD_QTY] * o[customer, ORD_UNIT_W]
 
 
 # ---------------------------------------------------------------------------
 # insert_stop
 # ---------------------------------------------------------------------------
 
-def test_insert_empty_route(tiny_data):
+def test_insert_empty_route(tiny_instance, tiny_dist_matrix):
     """Insert C0 at pos=0 in empty truck route -> length=1."""
-    sol = _make_sol(tiny_data)
-    _ins(sol, 0, 0, 0, tiny_data)
-    assert sol["lengths"][0] == 1
-    assert sol["stops"][0, 0] == _loc(tiny_data, 0)
-    assert sol["actions"][0, 0] == ACT_DELIVER
-    assert sol["distances"][0] > 0.0
+    sol = create_solution(1, 2, 5)
+    custs = tiny_instance["customers"]
+    insert_stop(sol, VEH_TRUCK, 0, 0, 0, ACT_DELIVER, tiny_dist_matrix, custs)
+
+    assert sol[SOL_TRUCK_LENGTHS][0] == 1
+    assert sol[SOL_TRUCK_STOPS][0, 0] == 0
+    assert sol[SOL_TRUCK_ACTIONS][0, 0] == ACT_DELIVER
+    assert sol[SOL_TRUCK_DISTANCES][0] > 0
 
 
-def test_insert_middle_shifts(tiny_data):
+def test_insert_middle_shifts(tiny_instance, tiny_dist_matrix):
     """Insert C1 at pos=1 in route [C3, C4] -> [C3, C1, C4]."""
-    sol = _make_sol(tiny_data)
-    _ins(sol, 1, 0, 3, tiny_data)
-    _ins(sol, 1, 1, 4, tiny_data)
-    assert sol["lengths"][1] == 2
+    sol = create_solution(1, 2, 5)
+    custs = tiny_instance["customers"]
+    dm = tiny_dist_matrix
 
-    _ins(sol, 1, 1, 1, tiny_data)
-    assert sol["lengths"][1] == 3
-    assert sol["stops"][1, 0] == _loc(tiny_data, 3)
-    assert sol["stops"][1, 1] == _loc(tiny_data, 1)
-    assert sol["stops"][1, 2] == _loc(tiny_data, 4)
+    insert_stop(sol, VEH_BIKE, 0, 0, 3, ACT_DELIVER, dm, custs)
+    insert_stop(sol, VEH_BIKE, 0, 1, 4, ACT_DELIVER, dm, custs)
+    assert sol[SOL_BIKE_LENGTHS][0] == 2
+
+    insert_stop(sol, VEH_BIKE, 0, 1, 1, ACT_DELIVER, dm, custs)
+    assert sol[SOL_BIKE_LENGTHS][0] == 3
+    assert sol[SOL_BIKE_STOPS][0, 0] == 3
+    assert sol[SOL_BIKE_STOPS][0, 1] == 1
+    assert sol[SOL_BIKE_STOPS][0, 2] == 4
 
 
-def test_insert_updates_customer_index(tiny_data):
+def test_insert_updates_customer_index(tiny_instance, tiny_dist_matrix):
     """DELIVER insert sets cust_vehicle, cust_route_pos."""
-    sol = _make_sol(tiny_data)
-    _ins(sol, 0, 0, 0, tiny_data)
-    assert sol["cust_vehicle"][0] == 0
-    assert sol["cust_route_pos"][0] == 0
+    sol = create_solution(1, 2, 5)
+    custs = tiny_instance["customers"]
+    insert_stop(sol, VEH_TRUCK, 0, 0, 0, ACT_DELIVER, tiny_dist_matrix, custs)
+
+    assert sol[SOL_CUST_VEHICLE][0] == 0
+    assert sol[SOL_CUST_ROUTE_POS][0] == 0
 
 
-def test_insert_pickup_no_customer_index(tiny_data):
-    """PICKUP does not update customer index."""
-    sol = _make_sol(tiny_data)
-    loc_id = _loc(tiny_data, 3)
-    insert_stop(sol, 1, 0, loc_id, ACT_PICKUP, tiny_data["dist_matrix"],
-                tiny_data["vehicles"], tiny_data["orders"], customer=-1)
-    assert sol["cust_vehicle"][3] == -1
+def test_insert_reload_no_customer_index(tiny_instance, tiny_dist_matrix):
+    """RELOAD does not update customer index for delivery."""
+    sol = create_solution(1, 2, 5)
+    custs = tiny_instance["customers"]
+    insert_stop(sol, VEH_BIKE, 0, 0, 3, ACT_RELOAD, tiny_dist_matrix, custs)
+
+    assert sol[SOL_CUST_VEHICLE][3] == -1
 
 
-def test_insert_shifts_route_pos(tiny_data):
+def test_insert_shifts_route_pos(tiny_instance, tiny_dist_matrix):
     """After insert at pos=0, subsequent customers get updated route_pos."""
-    sol = _make_sol(tiny_data)
-    _ins(sol, 1, 0, 3, tiny_data)
-    _ins(sol, 1, 1, 4, tiny_data)
+    sol = create_solution(1, 2, 5)
+    custs = tiny_instance["customers"]
+    dm = tiny_dist_matrix
 
-    _ins(sol, 1, 0, 1, tiny_data)
-    # All 3 customers should be assigned to vehicle 1
-    assert sol["cust_vehicle"][1] == 1
-    assert sol["cust_vehicle"][3] == 1
-    assert sol["cust_vehicle"][4] == 1
-    # Route should have 3 stops
-    assert sol["lengths"][1] == 3
+    insert_stop(sol, VEH_BIKE, 0, 0, 3, ACT_DELIVER, dm, custs)
+    insert_stop(sol, VEH_BIKE, 0, 1, 4, ACT_DELIVER, dm, custs)
+
+    insert_stop(sol, VEH_BIKE, 0, 0, 1, ACT_DELIVER, dm, custs)
+
+    # All 3 customers assigned to bike 0, global_vid = n_trucks(1) + 0 = 1
+    assert sol[SOL_CUST_VEHICLE][1] == 1
+    assert sol[SOL_CUST_VEHICLE][3] == 1
+    assert sol[SOL_CUST_VEHICLE][4] == 1
+    assert sol[SOL_BIKE_LENGTHS][0] == 3
 
 
 # ---------------------------------------------------------------------------
 # remove_stop
 # ---------------------------------------------------------------------------
 
-def test_remove_single(tiny_data):
+def test_remove_single(tiny_instance, tiny_dist_matrix):
     """Remove only stop -> empty route."""
-    sol = _make_sol(tiny_data)
-    _ins(sol, 0, 0, 0, tiny_data)
-    cust, act = remove_stop(sol, 0, 0, tiny_data["dist_matrix"],
-                            tiny_data["vehicles"], tiny_data["orders"], customer=0)
-    assert cust == _loc(tiny_data, 0)
-    assert sol["lengths"][0] == 0
+    sol = create_solution(1, 2, 5)
+    custs = tiny_instance["customers"]
+    dm = tiny_dist_matrix
+    insert_stop(sol, VEH_TRUCK, 0, 0, 0, ACT_DELIVER, dm, custs)
+
+    cust, act = remove_stop(sol, VEH_TRUCK, 0, 0, dm, custs)
+    assert cust == 0
+    assert sol[SOL_TRUCK_LENGTHS][0] == 0
 
 
-def test_remove_shifts_left(tiny_data):
+def test_remove_shifts_left(tiny_instance, tiny_dist_matrix):
     """Remove middle -> remaining shift left."""
-    sol = _make_sol(tiny_data)
-    _ins(sol, 1, 0, 3, tiny_data)
-    _ins(sol, 1, 1, 1, tiny_data)
-    _ins(sol, 1, 2, 4, tiny_data)
+    sol = create_solution(1, 2, 5)
+    custs = tiny_instance["customers"]
+    dm = tiny_dist_matrix
 
-    remove_stop(sol, 1, 1, tiny_data["dist_matrix"],
-                tiny_data["vehicles"], tiny_data["orders"], customer=1)
-    assert sol["lengths"][1] == 2
-    assert sol["stops"][1, 0] == _loc(tiny_data, 3)
-    assert sol["stops"][1, 1] == _loc(tiny_data, 4)
+    insert_stop(sol, VEH_BIKE, 0, 0, 3, ACT_DELIVER, dm, custs)
+    insert_stop(sol, VEH_BIKE, 0, 1, 1, ACT_DELIVER, dm, custs)
+    insert_stop(sol, VEH_BIKE, 0, 2, 4, ACT_DELIVER, dm, custs)
+
+    remove_stop(sol, VEH_BIKE, 0, 1, dm, custs)
+    assert sol[SOL_BIKE_LENGTHS][0] == 2
+    assert sol[SOL_BIKE_STOPS][0, 0] == 3
+    assert sol[SOL_BIKE_STOPS][0, 1] == 4
 
 
-def test_remove_clears_customer_index(tiny_data):
+def test_remove_clears_customer_index(tiny_instance, tiny_dist_matrix):
     """Removing DELIVER sets cust_vehicle = -1."""
-    sol = _make_sol(tiny_data)
-    _ins(sol, 0, 0, 0, tiny_data)
-    assert sol["cust_vehicle"][0] == 0
+    sol = create_solution(1, 2, 5)
+    custs = tiny_instance["customers"]
+    dm = tiny_dist_matrix
 
-    remove_stop(sol, 0, 0, tiny_data["dist_matrix"],
-                tiny_data["vehicles"], tiny_data["orders"], customer=0)
-    assert sol["cust_vehicle"][0] == -1
+    insert_stop(sol, VEH_TRUCK, 0, 0, 0, ACT_DELIVER, dm, custs)
+    assert sol[SOL_CUST_VEHICLE][0] == 0
+
+    remove_stop(sol, VEH_TRUCK, 0, 0, dm, custs)
+    assert sol[SOL_CUST_VEHICLE][0] == -1
 
 
 # ---------------------------------------------------------------------------
 # swap_stops_within
 # ---------------------------------------------------------------------------
 
-def test_swap_first_last(tiny_data):
+def test_swap_first_last(tiny_instance, tiny_dist_matrix):
     """Route [C3, C1, C4] swap(0,2) -> [C4, C1, C3]."""
-    sol = _make_sol(tiny_data)
-    _ins(sol, 1, 0, 3, tiny_data)
-    _ins(sol, 1, 1, 1, tiny_data)
-    _ins(sol, 1, 2, 4, tiny_data)
+    sol = create_solution(1, 2, 5)
+    custs = tiny_instance["customers"]
+    dm = tiny_dist_matrix
 
-    swap_stops_within(sol, 1, 0, 2, tiny_data["dist_matrix"], tiny_data["vehicles"])
+    insert_stop(sol, VEH_BIKE, 0, 0, 3, ACT_DELIVER, dm, custs)
+    insert_stop(sol, VEH_BIKE, 0, 1, 1, ACT_DELIVER, dm, custs)
+    insert_stop(sol, VEH_BIKE, 0, 2, 4, ACT_DELIVER, dm, custs)
 
-    assert sol["stops"][1, 0] == _loc(tiny_data, 4)
-    assert sol["stops"][1, 1] == _loc(tiny_data, 1)
-    assert sol["stops"][1, 2] == _loc(tiny_data, 3)
-    assert sol["lengths"][1] == 3
+    swap_stops_within(sol, VEH_BIKE, 0, 0, 2, dm)
+
+    assert sol[SOL_BIKE_STOPS][0, 0] == 4
+    assert sol[SOL_BIKE_STOPS][0, 1] == 1
+    assert sol[SOL_BIKE_STOPS][0, 2] == 3
+    assert sol[SOL_BIKE_LENGTHS][0] == 3
 
 
 # ---------------------------------------------------------------------------
 # reverse_segment
 # ---------------------------------------------------------------------------
 
-def test_reverse_middle(tiny_data):
+def test_reverse_middle(tiny_instance, tiny_dist_matrix):
     """Route [C0, C3, C4, C1, C2], reverse [1,3] -> [C0, C1, C4, C3, C2]."""
-    sol = _make_sol(tiny_data)
+    sol = create_solution(1, 2, 5)
+    custs = tiny_instance["customers"]
+    dm = tiny_dist_matrix
+
     for i, c in enumerate([0, 3, 4, 1, 2]):
-        _ins(sol, 0, i, c, tiny_data)
+        insert_stop(sol, VEH_TRUCK, 0, i, c, ACT_DELIVER, dm, custs)
 
-    reverse_segment(sol, 0, 1, 3, tiny_data["dist_matrix"], tiny_data["vehicles"])
+    reverse_segment(sol, VEH_TRUCK, 0, 1, 3, dm)
 
-    assert sol["stops"][0, 0] == _loc(tiny_data, 0)
-    assert sol["stops"][0, 1] == _loc(tiny_data, 1)
-    assert sol["stops"][0, 2] == _loc(tiny_data, 4)
-    assert sol["stops"][0, 3] == _loc(tiny_data, 3)
-    assert sol["stops"][0, 4] == _loc(tiny_data, 2)
+    assert sol[SOL_TRUCK_STOPS][0, 0] == 0
+    assert sol[SOL_TRUCK_STOPS][0, 1] == 1
+    assert sol[SOL_TRUCK_STOPS][0, 2] == 4
+    assert sol[SOL_TRUCK_STOPS][0, 3] == 3
+    assert sol[SOL_TRUCK_STOPS][0, 4] == 2
 
 
-def test_reverse_entire_route(tiny_data):
+def test_reverse_entire_route(tiny_instance, tiny_dist_matrix):
     """Reverse [C3, C4] -> [C4, C3]."""
-    sol = _make_sol(tiny_data)
-    _ins(sol, 1, 0, 3, tiny_data)
-    _ins(sol, 1, 1, 4, tiny_data)
+    sol = create_solution(1, 2, 5)
+    custs = tiny_instance["customers"]
+    dm = tiny_dist_matrix
 
-    reverse_segment(sol, 1, 0, 1, tiny_data["dist_matrix"], tiny_data["vehicles"])
+    insert_stop(sol, VEH_BIKE, 0, 0, 3, ACT_DELIVER, dm, custs)
+    insert_stop(sol, VEH_BIKE, 0, 1, 4, ACT_DELIVER, dm, custs)
 
-    assert sol["stops"][1, 0] == _loc(tiny_data, 4)
-    assert sol["stops"][1, 1] == _loc(tiny_data, 3)
+    reverse_segment(sol, VEH_BIKE, 0, 0, 1, dm)
+
+    assert sol[SOL_BIKE_STOPS][0, 0] == 4
+    assert sol[SOL_BIKE_STOPS][0, 1] == 3

@@ -1,19 +1,28 @@
-"""Convoy builder: truck (queen) + bikes (workers) at each satellite."""
+"""Convoy builder: truck (queen) + bikes (workers) at each satellite.
+
+All units: meters (i64), seconds (i64), grams (i64).
+"""
 import numpy as np
 
-from ..data.constants import COL_DEMAND, COL_TW_CLOSE, ACT_DELIVER, ACT_RELOAD
-from ..data.cost import BIKE_SPEED_URBAN, TRUCK_SPEED_URBAN, BIKE_CAPACITY, DAY_LENGTH
-from .constraints import calc_service_time
+from ..data.constants import (
+    COL_DEMAND, COL_TW_CLOSE, COL_SERVICE,
+    ACT_DELIVER, ACT_RELOAD, travel_time_s,
+)
+from ..data.cost import (
+    BIKE_SPEED_US_PER_M, TRUCK_SPEED_US_PER_M,
+    BIKE_CAPACITY_G, DAY_LENGTH, RELOAD_SERVICE_TIME,
+)
 
 
-def assign_customers_to_satellites(bike_customers, satellite_nodes, dist_matrix):
-    """Each customer -> nearest satellite. Returns dict {sat_node: [cust_list]}."""
+def assign_customers_to_satellites(bike_customers, satellite_nodes,
+                                   dist_matrix):
+    """Each customer -> nearest satellite. Returns {sat: [cust_list]}."""
     assignment = {s: [] for s in satellite_nodes}
     for c in bike_customers:
         best_s = satellite_nodes[0]
-        best_d = np.inf
+        best_d = 2**62
         for s in satellite_nodes:
-            d = dist_matrix[c + 1, s + 1]
+            d = int(dist_matrix[c + 1, s + 1])
             if d < best_d:
                 best_d = d
                 best_s = s
@@ -23,11 +32,10 @@ def assign_customers_to_satellites(bike_customers, satellite_nodes, dist_matrix)
 
 def build_bike_trips_at_satellite(sat_node, customers_at_sat, n_bikes,
                                    customers, dist_matrix, clock_start):
-    """Build 1 round of bike trips at satellite. Each bike does greedy NN, max 60kg.
+    """Build 1 round of bike trips at satellite. Greedy NN.
 
-    Returns list of trips: [{stops, bike_idx, time}], remaining customers, clock_after.
+    Returns list of trips, remaining customers.
     """
-    speed = BIKE_SPEED_URBAN
     remaining = list(customers_at_sat)
     trips = []
 
@@ -36,16 +44,15 @@ def build_bike_trips_at_satellite(sat_node, customers_at_sat, n_bikes,
             break
 
         trip_stops = []
-        trip_load = 0.0
+        trip_load = 0
         trip_clock = clock_start
         current_dm = sat_node + 1
 
         while remaining:
-            # Nearest unvisited
             best_node = None
-            best_dist = np.inf
+            best_dist = 2**62
             for c in remaining:
-                d = dist_matrix[current_dm, c + 1]
+                d = int(dist_matrix[current_dm, c + 1])
                 if d < best_dist:
                     best_dist = d
                     best_node = c
@@ -53,24 +60,22 @@ def build_bike_trips_at_satellite(sat_node, customers_at_sat, n_bikes,
             if best_node is None:
                 break
 
-            demand = float(customers[best_node, COL_DEMAND])
-            if trip_load + demand > BIKE_CAPACITY:
+            demand = int(customers[best_node, COL_DEMAND])
+            if trip_load + demand > BIKE_CAPACITY_G:
                 break
 
-            # Time check
-            travel = dist_matrix[current_dm, best_node + 1] / speed * 60.0
-            service = calc_service_time(demand)
-            arrival = trip_clock + travel
+            d = int(dist_matrix[current_dm, best_node + 1])
+            arrival = trip_clock + travel_time_s(d, BIKE_SPEED_US_PER_M)
 
-            if arrival > float(customers[best_node, COL_TW_CLOSE]):
-                # Skip for this trip but don't remove from remaining —
-                # another bike starting earlier might still reach this customer
+            if arrival > int(customers[best_node, COL_TW_CLOSE]):
                 break
 
-            # Check total time: serve + return to satellite + eventually return to depot
-            return_to_sat = dist_matrix[best_node + 1, sat_node + 1] / speed * 60.0
-            depot_return = dist_matrix[sat_node + 1, 0] / speed * 60.0
-            if arrival + service + return_to_sat + depot_return > DAY_LENGTH:
+            service = int(customers[best_node, COL_SERVICE])
+            ret_d = int(dist_matrix[best_node + 1, sat_node + 1])
+            ret_sat = travel_time_s(ret_d, BIKE_SPEED_US_PER_M)
+            dep_d = int(dist_matrix[sat_node + 1, 0])
+            dep_ret = travel_time_s(dep_d, BIKE_SPEED_US_PER_M)
+            if arrival + service + ret_sat + dep_ret > DAY_LENGTH:
                 break
 
             trip_clock = arrival + service
@@ -82,7 +87,6 @@ def build_bike_trips_at_satellite(sat_node, customers_at_sat, n_bikes,
         if trip_stops:
             trips.append({"stops": trip_stops, "bike_idx": bike_idx,
                           "last_dm": current_dm, "clock_end": trip_clock})
-
     return trips, remaining
 
 
@@ -90,62 +94,49 @@ def build_convoy_bike_routes(truck_trip, satellite_order, sat_customers,
                               n_bikes, customers, dist_matrix):
     """Build bike routes for 1 convoy following truck through satellites.
 
-    Each bike: depot -> [S1,RELOAD] -> custs -> [S2,RELOAD] -> custs -> ... -> depot
     Returns list of route dicts (1 per bike).
     """
-    bike_speed = BIKE_SPEED_URBAN
-    truck_speed = TRUCK_SPEED_URBAN
-    # Initialize bike states
     bike_stops = [[] for _ in range(n_bikes)]
     bike_actions = [[] for _ in range(n_bikes)]
-    bike_clocks = [0.0] * n_bikes
-    bike_prev_dm = [0] * n_bikes  # all start from depot
+    bike_clocks = [0] * n_bikes
+    bike_prev_dm = [0] * n_bikes
 
-    # Truck clock
-    truck_clock = 0.0
-    truck_prev_dm = 0  # depot
+    truck_clock = 0
+    truck_prev_dm = 0
 
     for sat_node in satellite_order:
         custs_here = list(sat_customers.get(sat_node, []))
         if not custs_here:
-            # Truck just passes through, no bike work
-            truck_clock += dist_matrix[truck_prev_dm, sat_node + 1] / truck_speed * 60.0
-            truck_clock += calc_service_time(float(customers[sat_node, COL_DEMAND]))
+            d = int(dist_matrix[truck_prev_dm, sat_node + 1])
+            truck_clock += travel_time_s(d, TRUCK_SPEED_US_PER_M)
+            truck_clock += RELOAD_SERVICE_TIME
             truck_prev_dm = sat_node + 1
             continue
 
-        # Truck arrives at satellite
-        truck_travel = dist_matrix[truck_prev_dm, sat_node + 1] / truck_speed * 60.0
-        truck_clock += truck_travel
+        d = int(dist_matrix[truck_prev_dm, sat_node + 1])
+        truck_clock += travel_time_s(d, TRUCK_SPEED_US_PER_M)
 
-        # Bikes travel to satellite
         for b in range(n_bikes):
-            bike_travel = dist_matrix[bike_prev_dm[b], sat_node + 1] / bike_speed * 60.0
-            bike_clocks[b] += bike_travel
+            bd = int(dist_matrix[bike_prev_dm[b], sat_node + 1])
+            bike_clocks[b] += travel_time_s(bd, BIKE_SPEED_US_PER_M)
             bike_prev_dm[b] = sat_node + 1
 
-        # Sync: everyone waits for slowest
         sync_time = max(truck_clock, max(bike_clocks))
-
-        # Multi-round: bikes fan out, return to satellite, reload, repeat
         remaining = list(custs_here)
         round_clock = sync_time
 
         while remaining:
-            # RELOAD at satellite for all bikes
             for b in range(n_bikes):
                 bike_stops[b].append(sat_node)
                 bike_actions[b].append(ACT_RELOAD)
                 bike_clocks[b] = round_clock
                 bike_prev_dm[b] = sat_node + 1
 
-            # Bikes fan out
             trips, remaining = build_bike_trips_at_satellite(
                 sat_node, remaining, n_bikes, customers, dist_matrix,
                 round_clock)
-
             if not trips:
-                break  # no bike could serve any remaining customer
+                break
 
             for trip in trips:
                 b = trip["bike_idx"]
@@ -155,35 +146,30 @@ def build_convoy_bike_routes(truck_trip, satellite_order, sat_customers,
                 bike_clocks[b] = trip["clock_end"]
                 bike_prev_dm[b] = trip["last_dm"]
 
-            # Next round starts when all bikes return to satellite
-            # Bikes travel back to satellite
             for b in range(n_bikes):
-                back_travel = dist_matrix[bike_prev_dm[b], sat_node + 1] / bike_speed * 60.0
-                bike_clocks[b] += back_travel
+                bd = int(dist_matrix[bike_prev_dm[b], sat_node + 1])
+                bike_clocks[b] += travel_time_s(bd, BIKE_SPEED_US_PER_M)
                 bike_prev_dm[b] = sat_node + 1
 
             round_clock = max(bike_clocks)
 
-            # Check DAY_LENGTH: any bike's total time (including depot return) > limit?
             max_return = max(
-                bike_clocks[b] + dist_matrix[bike_prev_dm[b], 0] / bike_speed * 60.0
-                for b in range(n_bikes)
-            )
+                bike_clocks[b] + travel_time_s(
+                    int(dist_matrix[bike_prev_dm[b], 0]),
+                    BIKE_SPEED_US_PER_M)
+                for b in range(n_bikes))
             if max_return > DAY_LENGTH:
                 break
 
-        # Truck service at satellite + wait for bikes
-        truck_service = calc_service_time(float(customers[sat_node, COL_DEMAND]))
-        truck_clock = max(sync_time + truck_service, max(bike_clocks))
+        truck_clock = max(sync_time + RELOAD_SERVICE_TIME,
+                          max(bike_clocks))
         truck_prev_dm = sat_node + 1
 
-    # Pack routes
     routes = []
     first_sat = satellite_order[0] if satellite_order else 0
     for b in range(n_bikes):
         if not bike_stops[b]:
             continue
-        # Find the first satellite this bike visited (first RELOAD stop)
         bike_sat = first_sat
         for k, act in enumerate(bike_actions[b]):
             if act == ACT_RELOAD:
@@ -192,7 +178,7 @@ def build_convoy_bike_routes(truck_trip, satellite_order, sat_customers,
         routes.append({
             "stops": np.array(bike_stops[b], dtype=np.int32),
             "actions": np.array(bike_actions[b], dtype=np.int8),
-            "initial_load": 0.0,
+            "initial_load": 0,
             "satellite_node": bike_sat,
             "cluster_idx": 0,
             "bike_id": b,

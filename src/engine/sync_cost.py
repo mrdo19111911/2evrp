@@ -1,72 +1,64 @@
-"""Sync cost between truck and bike at satellite nodes."""
+"""Sync cost between truck and bike at satellite nodes. All i64."""
 import numpy as np
+from numba import njit
 
 from src.data.constants import (
-    ACT_DELIVER, ACT_RELOAD,
+    ACT_RELOAD,
     ST_ACTION, ST_CUST, ST_DEPART, ST_ARRIVE,
     SAT_CUST, SAT_BIKE, SAT_TRUCK,
 )
-from src.data.cost import PENALTY_MISSING_RELOAD, PENALTY_SYNC_GAP_MIN
+from src.data.cost import PENALTY_MISSING_RELOAD, PENALTY_SYNC_GAP_SEC
 
 
-def compute_sync_cost(truck_states, bike_states, satellites, delta_t):
-    """Sync cost in VND. Returns (total_sync_cost, breakdown_list)."""
-    total = 0.0
-    breakdown = []
+@njit(cache=True)
+def _find_depart_3d(sim, lengths, vid, cust):
+    """Find RELOAD depart time (i64) in 3D sim. Returns -1 if not found."""
+    if vid >= len(lengths):
+        return np.int64(-1)
+    L = np.int32(lengths[vid])
+    for i in range(L):
+        if np.int32(sim[vid, i, ST_CUST]) == cust and np.int32(sim[vid, i, ST_ACTION]) == ACT_RELOAD:
+            return sim[vid, i, ST_DEPART]
+    return np.int64(-1)
 
-    for s in range(len(satellites)):
-        cust = int(satellites[s, SAT_CUST])
-        bike_id = int(satellites[s, SAT_BIKE])
-        truck_id = int(satellites[s, SAT_TRUCK])
 
-        truck_depart = _find_truck_depart(truck_states, truck_id, cust)
-        if truck_depart is None:
-            total += PENALTY_MISSING_RELOAD
-            breakdown.append({"sat": s, "cust": cust, "type": "missing",
-                              "cost": PENALTY_MISSING_RELOAD})
+@njit(cache=True)
+def _find_arrive_3d(sim, lengths, vid, cust):
+    """Find RELOAD arrive time (i64) in 3D sim. Returns -1 if not found."""
+    if vid >= len(lengths):
+        return np.int64(-1)
+    L = np.int32(lengths[vid])
+    for i in range(L):
+        if np.int32(sim[vid, i, ST_CUST]) == cust and np.int32(sim[vid, i, ST_ACTION]) == ACT_RELOAD:
+            return sim[vid, i, ST_ARRIVE]
+    return np.int64(-1)
+
+
+@njit(cache=True)
+def compute_sync_cost(truck_sim, truck_lengths, bike_sim, bike_lengths,
+                      satellites, n_satellites, delta_t_s):
+    """Sync cost in VND (i64). Returns total_sync_cost."""
+    total = np.int64(0)
+    missing = np.int64(PENALTY_MISSING_RELOAD)
+    gap_per_s = np.int64(PENALTY_SYNC_GAP_SEC)
+
+    for s in range(n_satellites):
+        cust = np.int32(satellites[s, SAT_CUST])
+        bike_id = np.int32(satellites[s, SAT_BIKE])
+        truck_id = np.int32(satellites[s, SAT_TRUCK])
+
+        truck_depart = _find_depart_3d(truck_sim, truck_lengths, truck_id, cust)
+        if truck_depart < 0:
+            total += missing
             continue
 
-        bike_arrive = _find_bike_arrive(bike_states, bike_id, cust)
-        if bike_arrive is None:
-            total += PENALTY_MISSING_RELOAD
-            breakdown.append({"sat": s, "cust": cust, "type": "missing",
-                              "cost": PENALTY_MISSING_RELOAD})
+        bike_arrive = _find_arrive_3d(bike_sim, bike_lengths, bike_id, cust)
+        if bike_arrive < 0:
+            total += missing
             continue
 
         gap = abs(truck_depart - bike_arrive)
-        if gap > delta_t:
-            cost = PENALTY_SYNC_GAP_MIN * (gap - delta_t)
-            total += cost
-            breakdown.append({"sat": s, "cust": cust, "type": "gap",
-                              "gap": gap, "cost": cost})
-        else:
-            breakdown.append({"sat": s, "cust": cust, "type": "ok",
-                              "gap": gap, "cost": 0.0})
+        if gap > delta_t_s:
+            total += gap_per_s * (gap - delta_t_s)
 
-    return total, breakdown
-
-
-def _find_truck_depart(truck_states, truck_id, cust):
-    """Find truck RELOAD depart time at satellite node."""
-    if truck_id >= len(truck_states):
-        return None
-    t_state = truck_states[truck_id]
-    if len(t_state) == 0:
-        return None
-    t_mask = (t_state[:, ST_CUST] == cust) & (t_state[:, ST_ACTION] == ACT_RELOAD)
-    if not np.any(t_mask):
-        return None
-    return float(t_state[t_mask][0, ST_DEPART])
-
-
-def _find_bike_arrive(bike_states, bike_id, cust):
-    """Find bike RELOAD arrive time at customer node."""
-    if bike_id >= len(bike_states):
-        return None
-    b_state = bike_states[bike_id]
-    if len(b_state) == 0:
-        return None
-    b_mask = (b_state[:, ST_CUST] == cust) & (b_state[:, ST_ACTION] == ACT_RELOAD)
-    if not np.any(b_mask):
-        return None
-    return float(b_state[b_mask][0, ST_ARRIVE])
+    return total

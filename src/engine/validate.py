@@ -1,148 +1,235 @@
-"""Constraint validation — full check after simulation."""
+"""Constraint validation — all @njit. Flat violation arrays, manual loops."""
 import numpy as np
-
+from numba import njit
 from src.data.constants import (
-    ACT_DELIVER, ACT_RELOAD,
-    ST_CUST, ST_ACTION, ST_ARRIVE, ST_DEPART, ST_LOAD_AFT,
-    SAT_CUST, SAT_BIKE, SAT_TRUCK,
-    COL_TW_CLOSE, VCOL_CAPACITY,
+    ACT_DELIVER, ACT_RELOAD, ST_CUST, ST_ACTION, ST_ARRIVE, ST_DEPART,
+    ST_LOAD_AFT, SAT_CUST, SAT_BIKE, SAT_TRUCK, COL_TW_CLOSE, COL_RESTRICTED,
+    VCOL_CAPACITY, MAX_VIOLATIONS, SOL_TRUCK_STOPS, SOL_TRUCK_ACTIONS,
+    SOL_BIKE_STOPS, SOL_BIKE_ACTIONS, SOL_TRUCK_LENGTHS, SOL_BIKE_LENGTHS,
+    SOL_SATELLITES, SOL_META, META_N_TRUCKS, META_N_BIKES, META_N_SATELLITES,
 )
 
 
-def validate_delivery_uniqueness(truck_stops, truck_actions, bike_stops, bike_actions, n_customers):
-    """Each customer delivered exactly once. Returns (valid, unserved, duplicates)."""
+@njit(cache=True)
+def validate_delivery_uniqueness(truck_stops, truck_actions, truck_lengths,
+                                  bike_stops, bike_actions, bike_lengths,
+                                  n_trucks, n_bikes, n_customers):
+    """Each customer delivered exactly once. Returns (unserved, n_unserved, n_dup)."""
     count = np.zeros(n_customers, dtype=np.int32)
+    for i in range(n_trucks):
+        for j in range(truck_lengths[i]):
+            if truck_actions[i, j] == ACT_DELIVER and truck_stops[i, j] >= 0:
+                c = truck_stops[i, j]
+                if c < n_customers:
+                    count[c] += 1
+    for i in range(n_bikes):
+        for j in range(bike_lengths[i]):
+            if bike_actions[i, j] == ACT_DELIVER and bike_stops[i, j] >= 0:
+                c = bike_stops[i, j]
+                if c < n_customers:
+                    count[c] += 1
 
-    mask = (truck_actions == ACT_DELIVER) & (truck_stops >= 0)
-    np.add.at(count, truck_stops[mask], 1)
-
-    mask = (bike_actions == ACT_DELIVER) & (bike_stops >= 0)
-    np.add.at(count, bike_stops[mask], 1)
-
-    unserved = np.where(count == 0)[0].astype(np.int32)
-    duplicates = np.where(count > 1)[0].astype(np.int32)
-    valid = len(unserved) == 0 and len(duplicates) == 0
-    return valid, unserved, duplicates
-
-
-def validate_vehicle_restrictions(truck_stops, truck_actions, restricted):
-    """Restricted customers not truck-delivered. Returns (valid, violations)."""
-    mask = (truck_actions == ACT_DELIVER) & (truck_stops >= 0)
-    truck_delivers = truck_stops[mask]
-    violations = truck_delivers[restricted[truck_delivers] == 1]
-    violations = np.unique(violations).astype(np.int32)
-    valid = len(violations) == 0
-    return valid, violations
+    unserved = np.empty(n_customers, dtype=np.int32)
+    n_unserved = np.int32(0)
+    n_dup = np.int32(0)
+    for i in range(n_customers):
+        if count[i] == 0:
+            unserved[n_unserved] = np.int32(i)
+            n_unserved += 1
+        elif count[i] > 1:
+            n_dup += 1
+    return unserved, n_unserved, n_dup
 
 
-def validate_capacity_all(truck_states, bike_states, vehicles):
-    """Load never < 0 or > capacity. Returns (valid, violations)."""
-    violations = []
-    n_trucks = len(truck_states)
+@njit(cache=True)
+def validate_vehicle_restrictions(truck_stops, truck_actions, truck_lengths,
+                                   n_trucks, customers):
+    """Restricted customers must not be truck-delivered. Returns (vr_viol, n_vr)."""
+    n_cust = len(customers)
+    seen = np.zeros(n_cust, dtype=np.int8)
+    vr_viol = np.empty(n_cust, dtype=np.int32)
+    n_vr = np.int32(0)
+    for i in range(n_trucks):
+        for j in range(truck_lengths[i]):
+            if truck_actions[i, j] == ACT_DELIVER:
+                c = truck_stops[i, j]
+                if c >= 0 and c < n_cust and customers[c, COL_RESTRICTED] == 1 and seen[c] == 0:
+                    seen[c] = 1
+                    vr_viol[n_vr] = c
+                    n_vr += 1
+    return vr_viol, n_vr
 
-    for i, state in enumerate(truck_states):
-        if len(state) == 0:
+
+@njit(cache=True)
+def validate_capacity_3d(sim_states, lengths, vehicles, vtype_offset, n_vehicles):
+    """Load never > capacity. Returns (violations i64(MAX_VIOLATIONS,4), n_viol)."""
+    violations = np.zeros((MAX_VIOLATIONS, 4), dtype=np.int64)
+    n_viol = 0
+    for i in range(n_vehicles):
+        L = np.int32(lengths[i])
+        if L == 0:
             continue
-        cap = vehicles[i, VCOL_CAPACITY]
-        load_aft = state[:, ST_LOAD_AFT]
-        bad = np.where((load_aft < 0) | (load_aft > cap))[0]
-        for j in bad:
-            violations.append(("truck", i, int(j), float(load_aft[j])))
-
-    for i, state in enumerate(bike_states):
-        if len(state) == 0:
-            continue
-        cap = vehicles[n_trucks + i, VCOL_CAPACITY]
-        load_aft = state[:, ST_LOAD_AFT]
-        bad = np.where((load_aft < 0) | (load_aft > cap))[0]
-        for j in bad:
-            violations.append(("bike", i, int(j), float(load_aft[j])))
-
-    return len(violations) == 0, violations
+        cap = vehicles[vtype_offset + i, VCOL_CAPACITY]
+        for j in range(L):
+            load = sim_states[i, j, ST_LOAD_AFT]
+            if load < 0 or load > cap:
+                if n_viol < MAX_VIOLATIONS:
+                    violations[n_viol, 0] = 0
+                    violations[n_viol, 1] = i
+                    violations[n_viol, 2] = j
+                    violations[n_viol, 3] = load
+                    n_viol += 1
+    return violations, n_viol
 
 
-def validate_time_windows(truck_states, bike_states, customers):
-    """DELIVER stops within TW. Returns (valid, violations)."""
-    violations = []
-
-    for vtype, states in [("truck", truck_states), ("bike", bike_states)]:
-        for vid, state in enumerate(states):
-            if len(state) == 0:
+@njit(cache=True)
+def validate_time_windows_3d(sim_states, lengths, n_vehicles, customers, vtype_label):
+    """DELIVER stops within TW. Returns (violations i64(MAX_VIOLATIONS,5), n_viol)."""
+    violations = np.zeros((MAX_VIOLATIONS, 5), dtype=np.int64)
+    n_viol = 0
+    for vid in range(n_vehicles):
+        L = np.int32(lengths[vid])
+        for row_idx in range(L):
+            if sim_states[vid, row_idx, ST_ACTION] != ACT_DELIVER:
                 continue
-            for row_idx in range(len(state)):
-                if int(state[row_idx, ST_ACTION]) != ACT_DELIVER:
-                    continue
-                cust = int(state[row_idx, ST_CUST])
-                arrive = state[row_idx, ST_ARRIVE]
-                tw_close = customers[cust, COL_TW_CLOSE]
-                if arrive > tw_close:
-                    violations.append((vtype, vid, cust, float(arrive), float(tw_close)))
+            cust = np.int32(sim_states[vid, row_idx, ST_CUST])
+            arrive = sim_states[vid, row_idx, ST_ARRIVE]
+            tw_close = customers[cust, COL_TW_CLOSE]
+            if arrive > tw_close:
+                if n_viol < MAX_VIOLATIONS:
+                    violations[n_viol, 0] = vtype_label
+                    violations[n_viol, 1] = vid
+                    violations[n_viol, 2] = cust
+                    violations[n_viol, 3] = arrive
+                    violations[n_viol, 4] = tw_close
+                    n_viol += 1
+    return violations, n_viol
 
-    return len(violations) == 0, violations
 
-
-def validate_sync(truck_states, bike_states, satellites, delta_t):
-    """Truck RELOAD and bike RELOAD at same satellite node within +-delta_t.
-
-    Truck action = RELOAD (hands off goods). Bike action = RELOAD (receives goods).
-
-    Returns (valid, violations).
-    """
-    violations = []
-
-    for s in range(len(satellites)):
-        cust = int(satellites[s, SAT_CUST])
-        bike_id = int(satellites[s, SAT_BIKE])
-        truck_id = int(satellites[s, SAT_TRUCK])
-
-        if truck_id >= len(truck_states) or bike_id >= len(bike_states):
-            violations.append((s, "invalid_vehicle_id", {}))
+@njit(cache=True)
+def validate_sync_3d(truck_sim, truck_lengths, bike_sim, bike_lengths,
+                     satellites, n_satellites, delta_t_s):
+    """Sync validation. Returns (violations i64(MAX_VIOLATIONS,4), n_viol)."""
+    violations = np.zeros((MAX_VIOLATIONS, 4), dtype=np.int64)
+    n_viol = 0
+    for s in range(n_satellites):
+        cust = np.int32(satellites[s, SAT_CUST])
+        bike_id = np.int32(satellites[s, SAT_BIKE])
+        truck_id = np.int32(satellites[s, SAT_TRUCK])
+        truck_depart = _find_depart_3d(truck_sim, truck_lengths, truck_id, cust, ACT_RELOAD)
+        if truck_depart < 0:
+            if n_viol < MAX_VIOLATIONS:
+                violations[n_viol, 0] = s
+                violations[n_viol, 1] = -1
+                violations[n_viol, 2] = -1
+                violations[n_viol, 3] = -1
+                n_viol += 1
             continue
-
-        # Truck RELOAD at satellite real_node (hands off goods to bikes)
-        t_state = truck_states[truck_id]
-        t_mask = (t_state[:, ST_CUST] == cust) & (t_state[:, ST_ACTION] == ACT_RELOAD)
-        if not np.any(t_mask):
-            violations.append((s, "truck_not_at_node", {}))
+        bike_arrive = _find_arrive_3d(bike_sim, bike_lengths, bike_id, cust, ACT_RELOAD)
+        if bike_arrive < 0:
+            if n_viol < MAX_VIOLATIONS:
+                violations[n_viol, 0] = s
+                violations[n_viol, 1] = -1
+                violations[n_viol, 2] = -1
+                violations[n_viol, 3] = -1
+                n_viol += 1
             continue
-        truck_depart = t_state[t_mask][0, ST_DEPART]
-
-        # Bike RELOADs at satellite real_node
-        b_state = bike_states[bike_id]
-        b_mask = (b_state[:, ST_CUST] == cust) & (b_state[:, ST_ACTION] == ACT_RELOAD)
-        if not np.any(b_mask):
-            violations.append((s, "bike_not_at_node", {}))
-            continue
-        bike_arrive = b_state[b_mask][0, ST_ARRIVE]
-
-        gap = abs(float(truck_depart) - float(bike_arrive))
-        if gap > delta_t:
-            violations.append((s, "sync_gap_too_large",
-                {"truck_depart": float(truck_depart),
-                 "bike_arrive": float(bike_arrive),
-                 "gap": gap}))
-
-    return len(violations) == 0, violations
+        gap = abs(truck_depart - bike_arrive)
+        if gap > delta_t_s:
+            if n_viol < MAX_VIOLATIONS:
+                violations[n_viol, 0] = s
+                violations[n_viol, 1] = truck_depart
+                violations[n_viol, 2] = bike_arrive
+                violations[n_viol, 3] = gap
+                n_viol += 1
+    return violations, n_viol
 
 
-def validate_all(truck_stops, truck_actions, bike_stops, bike_actions,
-                 truck_states, bike_states, satellites, customers, restricted,
-                 vehicles, n_customers, delta_t):
-    """Run all validators. Returns (valid, report)."""
-    du_valid, unserved, duplicates = validate_delivery_uniqueness(
-        truck_stops, truck_actions, bike_stops, bike_actions, n_customers)
-    vr_valid, vr_violations = validate_vehicle_restrictions(
-        truck_stops, truck_actions, restricted)
-    cap_valid, cap_violations = validate_capacity_all(truck_states, bike_states, vehicles)
-    tw_valid, tw_violations = validate_time_windows(truck_states, bike_states, customers)
-    sync_valid, sync_violations = validate_sync(truck_states, bike_states, satellites, delta_t)
+@njit(cache=True)
+def _find_depart_3d(sim, lengths, vid, cust, action):
+    if vid >= len(lengths):
+        return np.int64(-1)
+    L = np.int32(lengths[vid])
+    for i in range(L):
+        if np.int32(sim[vid, i, ST_CUST]) == cust and np.int32(sim[vid, i, ST_ACTION]) == action:
+            return sim[vid, i, ST_DEPART]
+    return np.int64(-1)
 
-    report = {
-        "delivery_uniqueness": {"valid": du_valid, "unserved": unserved, "duplicates": duplicates},
-        "vehicle_restrictions": {"valid": vr_valid, "violations": vr_violations},
-        "capacity": {"valid": cap_valid, "violations": cap_violations},
-        "time_windows": {"valid": tw_valid, "violations": tw_violations},
-        "sync": {"valid": sync_valid, "violations": sync_violations},
-    }
-    valid = du_valid and vr_valid and cap_valid and tw_valid and sync_valid
-    return valid, report
+
+@njit(cache=True)
+def _find_arrive_3d(sim, lengths, vid, cust, action):
+    if vid >= len(lengths):
+        return np.int64(-1)
+    L = np.int32(lengths[vid])
+    for i in range(L):
+        if np.int32(sim[vid, i, ST_CUST]) == cust and np.int32(sim[vid, i, ST_ACTION]) == action:
+            return sim[vid, i, ST_ARRIVE]
+    return np.int64(-1)
+
+
+@njit(cache=True)
+def validate_all(sol, truck_sim, bike_sim, customers,
+                 vehicles, n_customers, delta_t_s):
+    """Run all validators. Fully @njit."""
+    meta = sol[SOL_META]
+    n_trucks = meta[META_N_TRUCKS]
+    n_bikes = meta[META_N_BIKES]
+    n_sats = meta[META_N_SATELLITES]
+
+    truck_stops = sol[SOL_TRUCK_STOPS]
+    truck_actions = sol[SOL_TRUCK_ACTIONS]
+    bike_stops = sol[SOL_BIKE_STOPS]
+    bike_actions = sol[SOL_BIKE_ACTIONS]
+    truck_lengths = sol[SOL_TRUCK_LENGTHS]
+    bike_lengths = sol[SOL_BIKE_LENGTHS]
+    sats = sol[SOL_SATELLITES]
+
+    unserved, n_unserved, n_dup = validate_delivery_uniqueness(
+        truck_stops, truck_actions, truck_lengths,
+        bike_stops, bike_actions, bike_lengths,
+        n_trucks, n_bikes, n_customers)
+
+    vr_viol, n_vr = validate_vehicle_restrictions(
+        truck_stops, truck_actions, truck_lengths, n_trucks, customers)
+
+    # Capacity
+    t_cap, n_tc = validate_capacity_3d(truck_sim, truck_lengths, vehicles, 0, n_trucks)
+    b_cap, n_bc = validate_capacity_3d(bike_sim, bike_lengths, vehicles, n_trucks, n_bikes)
+    cap_viol = np.zeros((MAX_VIOLATIONS, 4), dtype=np.int64)
+    for i in range(n_tc):
+        cap_viol[i, 0] = 0
+        cap_viol[i, 1] = t_cap[i, 1]
+        cap_viol[i, 2] = t_cap[i, 2]
+        cap_viol[i, 3] = t_cap[i, 3]
+    for i in range(n_bc):
+        idx = n_tc + i
+        if idx < MAX_VIOLATIONS:
+            cap_viol[idx, 0] = 1
+            cap_viol[idx, 1] = b_cap[i, 1]
+            cap_viol[idx, 2] = b_cap[i, 2]
+            cap_viol[idx, 3] = b_cap[i, 3]
+    n_cap = n_tc + n_bc
+
+    # Time windows
+    t_tw, n_ttw = validate_time_windows_3d(truck_sim, truck_lengths, n_trucks, customers, 0)
+    b_tw, n_btw = validate_time_windows_3d(bike_sim, bike_lengths, n_bikes, customers, 1)
+    tw_viol = np.zeros((MAX_VIOLATIONS, 5), dtype=np.int64)
+    for i in range(n_ttw):
+        for k in range(5):
+            tw_viol[i, k] = t_tw[i, k]
+    for i in range(n_btw):
+        idx = n_ttw + i
+        if idx < MAX_VIOLATIONS:
+            for k in range(5):
+                tw_viol[idx, k] = b_tw[i, k]
+    n_tw = n_ttw + n_btw
+
+    # Sync
+    sync_viol, n_sync = validate_sync_3d(truck_sim, truck_lengths, bike_sim, bike_lengths,
+                                          sats, n_sats, delta_t_s)
+
+    valid = (n_unserved == 0 and n_dup == 0 and n_vr == 0
+             and n_cap == 0 and n_tw == 0 and n_sync == 0)
+
+    return (valid, unserved, n_unserved, n_dup,
+            vr_viol, n_vr, cap_viol, n_cap, tw_viol, n_tw, sync_viol, n_sync)

@@ -1,7 +1,4 @@
-"""Tests for delta cost evaluation — Data Model v2.
-
-Unified vehicle arrays, (2, N, N) dist_matrix.
-"""
+"""Tests for delta cost evaluation -- tuple-based solution. All i64."""
 import numpy as np
 import pytest
 
@@ -14,165 +11,140 @@ from src.solution.delta import (
     find_best_insertion_all_routes,
 )
 from src.data.constants import (
-    ACT_DELIVER, ACT_PAD, VTYPE_TRUCK, VTYPE_BIKE,
-    ORD_LOC, ORD_QTY, ORD_UNIT_W,
-    DM_DIST,
+    ACT_DELIVER, ACT_PAD, VEH_TRUCK, VEH_BIKE,
+    SOL_TRUCK_STOPS, SOL_TRUCK_ACTIONS, SOL_TRUCK_LENGTHS,
+    SOL_BIKE_STOPS, SOL_BIKE_ACTIONS, SOL_BIKE_LENGTHS,
+    SOL_TRUCK_DISTANCES, SOL_BIKE_DISTANCES,
 )
-
-
-def _make_sol(data):
-    return create_solution(data["n_vehicles"], data["n_customers"],
-                           n_sku=data["n_sku"])
-
-
-def _ins(sol, v, pos, customer, data):
-    orders = data["orders"]
-    loc_id = int(orders[customer, ORD_LOC])
-    insert_stop(sol, v, pos, loc_id, ACT_DELIVER, data["dist_matrix"],
-                data["vehicles"], orders, customer=customer)
-
-
-def _loc(data, customer):
-    return int(data["orders"][customer, ORD_LOC])
 
 
 # ---------------------------------------------------------------------------
 # insertion_cost_delta
 # ---------------------------------------------------------------------------
 
-def test_insert_empty_route(tiny_data):
+def test_insert_empty_route(tiny_instance, tiny_dist_matrix):
     """Empty route: delta = round-trip to customer location."""
-    sol = _make_sol(tiny_data)
-    dm = tiny_data["dist_matrix"]
-    veh = tiny_data["vehicles"]
-    loc_id = _loc(tiny_data, 0)
-    delta = insertion_cost_delta(sol, 0, 0, loc_id, dm, veh)
-    # Should be depot->loc->depot distance
-    d = dm[DM_DIST, 0, loc_id] + dm[DM_DIST, loc_id, 0]
-    assert pytest.approx(delta, abs=1e-4) == d
+    sol = create_solution(1, 2, 5)
+    dm = tiny_dist_matrix
+    delta = insertion_cost_delta(sol, VEH_TRUCK, 0, 0, 0, dm)
+    # depot->C0->depot: dm[0, 1] + dm[1, 0]
+    expected = dm[0, 1] + dm[1, 0]
+    assert delta == expected
 
 
-def test_insert_consistency(tiny_data):
+def test_insert_consistency(tiny_instance, tiny_dist_matrix):
     """old_distance + delta == new_distance after actual insert."""
-    sol = _make_sol(tiny_data)
-    dm = tiny_data["dist_matrix"]
-    veh = tiny_data["vehicles"]
-    orders = tiny_data["orders"]
+    sol = create_solution(1, 2, 5)
+    dm = tiny_dist_matrix
+    custs = tiny_instance["customers"]
 
-    # Build route [C3, C4] on bike (v=1)
-    _ins(sol, 1, 0, 3, tiny_data)
-    _ins(sol, 1, 1, 4, tiny_data)
-    old_dist = sol["distances"][1]
+    insert_stop(sol, VEH_BIKE, 0, 0, 3, ACT_DELIVER, dm, custs)
+    insert_stop(sol, VEH_BIKE, 0, 1, 4, ACT_DELIVER, dm, custs)
+    old_dist = sol[SOL_BIKE_DISTANCES][0]
 
-    loc_id = _loc(tiny_data, 1)  # C1
-    delta = insertion_cost_delta(sol, 1, 1, loc_id, dm, veh)
+    delta = insertion_cost_delta(sol, VEH_BIKE, 0, 1, 1, dm)
 
-    insert_stop(sol, 1, 1, loc_id, ACT_DELIVER, dm, veh, orders, customer=1)
-    new_dist = sol["distances"][1]
+    insert_stop(sol, VEH_BIKE, 0, 1, 1, ACT_DELIVER, dm, custs)
+    new_dist = sol[SOL_BIKE_DISTANCES][0]
 
-    assert pytest.approx(old_dist + delta, abs=1e-4) == new_dist
+    assert old_dist + delta == new_dist
 
 
 # ---------------------------------------------------------------------------
 # removal_cost_delta
 # ---------------------------------------------------------------------------
 
-def test_remove_only_stop(tiny_data):
+def test_remove_only_stop(tiny_instance, tiny_dist_matrix):
     """Remove only stop: delta = -(round-trip distance)."""
-    sol = _make_sol(tiny_data)
-    dm = tiny_data["dist_matrix"]
-    veh = tiny_data["vehicles"]
+    sol = create_solution(1, 2, 5)
+    dm = tiny_dist_matrix
+    custs = tiny_instance["customers"]
 
-    _ins(sol, 0, 0, 0, tiny_data)
-    dist_before = sol["distances"][0]
-    delta = removal_cost_delta(sol, 0, 0, dm, veh)
-    assert pytest.approx(delta, abs=1e-4) == -dist_before
+    insert_stop(sol, VEH_TRUCK, 0, 0, 0, ACT_DELIVER, dm, custs)
+    dist_before = sol[SOL_TRUCK_DISTANCES][0]
+    delta = removal_cost_delta(sol, VEH_TRUCK, 0, 0, dm)
+    assert delta == -dist_before
 
 
-def test_removal_consistency(tiny_data):
+def test_removal_consistency(tiny_instance, tiny_dist_matrix):
     """old + delta == new after actual removal."""
-    sol = _make_sol(tiny_data)
-    dm = tiny_data["dist_matrix"]
-    veh = tiny_data["vehicles"]
-    orders = tiny_data["orders"]
+    sol = create_solution(1, 2, 5)
+    dm = tiny_dist_matrix
+    custs = tiny_instance["customers"]
 
-    _ins(sol, 1, 0, 3, tiny_data)
-    _ins(sol, 1, 1, 1, tiny_data)
-    _ins(sol, 1, 2, 4, tiny_data)
+    insert_stop(sol, VEH_BIKE, 0, 0, 3, ACT_DELIVER, dm, custs)
+    insert_stop(sol, VEH_BIKE, 0, 1, 1, ACT_DELIVER, dm, custs)
+    insert_stop(sol, VEH_BIKE, 0, 2, 4, ACT_DELIVER, dm, custs)
 
-    old_dist = sol["distances"][1]
-    delta = removal_cost_delta(sol, 1, 1, dm, veh)
+    old_dist = sol[SOL_BIKE_DISTANCES][0]
+    delta = removal_cost_delta(sol, VEH_BIKE, 0, 1, dm)
 
-    remove_stop(sol, 1, 1, dm, veh, orders, customer=1)
-    new_dist = sol["distances"][1]
+    remove_stop(sol, VEH_BIKE, 0, 1, dm, custs)
+    new_dist = sol[SOL_BIKE_DISTANCES][0]
 
-    assert pytest.approx(old_dist + delta, abs=1e-4) == new_dist
+    assert old_dist + delta == new_dist
 
 
-def test_removal_nonpositive(tiny_data):
+def test_removal_nonpositive(tiny_instance, tiny_dist_matrix):
     """Removal delta should be <= 0."""
-    sol = _make_sol(tiny_data)
-    dm = tiny_data["dist_matrix"]
-    veh = tiny_data["vehicles"]
+    sol = create_solution(1, 2, 5)
+    dm = tiny_dist_matrix
+    custs = tiny_instance["customers"]
 
-    _ins(sol, 1, 0, 3, tiny_data)
-    _ins(sol, 1, 1, 1, tiny_data)
-    _ins(sol, 1, 2, 4, tiny_data)
+    insert_stop(sol, VEH_BIKE, 0, 0, 3, ACT_DELIVER, dm, custs)
+    insert_stop(sol, VEH_BIKE, 0, 1, 1, ACT_DELIVER, dm, custs)
+    insert_stop(sol, VEH_BIKE, 0, 2, 4, ACT_DELIVER, dm, custs)
 
     for pos in range(3):
-        delta = removal_cost_delta(sol, 1, pos, dm, veh)
-        assert delta <= 1e-9, f"pos={pos} delta={delta}"
+        delta = removal_cost_delta(sol, VEH_BIKE, 0, pos, dm)
+        assert delta <= 0, f"pos={pos} delta={delta}"
 
 
 # ---------------------------------------------------------------------------
 # best_insertion_pos
 # ---------------------------------------------------------------------------
 
-def test_best_pos_empty(tiny_data):
+def test_best_pos_empty(tiny_instance, tiny_dist_matrix):
     """Empty route: only pos=0 available."""
-    sol = _make_sol(tiny_data)
-    dm = tiny_data["dist_matrix"]
-    veh = tiny_data["vehicles"]
-    loc_id = _loc(tiny_data, 0)
-    pos, delta = best_insertion_pos(sol, 0, loc_id, dm, veh)
+    sol = create_solution(1, 2, 5)
+    dm = tiny_dist_matrix
+    pos, delta = best_insertion_pos(sol, VEH_TRUCK, 0, 0, dm)
     assert pos == 0
     assert delta > 0
 
 
-def test_best_pos_minimizes(tiny_data):
+def test_best_pos_minimizes(tiny_instance, tiny_dist_matrix):
     """Best pos should have smallest delta."""
-    sol = _make_sol(tiny_data)
-    dm = tiny_data["dist_matrix"]
-    veh = tiny_data["vehicles"]
+    sol = create_solution(1, 2, 5)
+    dm = tiny_dist_matrix
+    custs = tiny_instance["customers"]
 
-    _ins(sol, 1, 0, 3, tiny_data)
-    _ins(sol, 1, 1, 4, tiny_data)
+    insert_stop(sol, VEH_BIKE, 0, 0, 3, ACT_DELIVER, dm, custs)
+    insert_stop(sol, VEH_BIKE, 0, 1, 4, ACT_DELIVER, dm, custs)
 
-    loc_id = _loc(tiny_data, 1)
-    pos, delta = best_insertion_pos(sol, 1, loc_id, dm, veh)
+    pos, delta = best_insertion_pos(sol, VEH_BIKE, 0, 1, dm)
 
     # Verify this is actually the best
-    for p in range(sol["lengths"][1] + 1):
-        d = insertion_cost_delta(sol, 1, p, loc_id, dm, veh)
-        assert d >= delta - 1e-9
+    for p in range(sol[SOL_BIKE_LENGTHS][0] + 1):
+        d = insertion_cost_delta(sol, VEH_BIKE, 0, p, 1, dm)
+        assert d >= delta
 
 
 # ---------------------------------------------------------------------------
 # find_best_insertion_all_routes
 # ---------------------------------------------------------------------------
 
-def test_find_best_single_route(tiny_data):
+def test_find_best_single_route(tiny_instance, tiny_dist_matrix):
     """One bike with space -> returns that route."""
-    sol = _make_sol(tiny_data)
-    dm = tiny_data["dist_matrix"]
-    veh = tiny_data["vehicles"]
-    orders = tiny_data["orders"]
+    sol = create_solution(1, 2, 5)
+    dm = tiny_dist_matrix
+    custs = tiny_instance["customers"]
+    vehicles = tiny_instance["vehicles"]
 
-    _ins(sol, 1, 0, 3, tiny_data)  # bike 0
+    insert_stop(sol, VEH_BIKE, 0, 0, 3, ACT_DELIVER, dm, custs)
 
-    loc_id = _loc(tiny_data, 4)
     vid, pos, delta = find_best_insertion_all_routes(
-        sol, 4, loc_id, dm, veh, orders,
+        sol, VEH_BIKE, 4, dm, custs, vehicles,
     )
     assert vid >= 0
-    assert delta < np.inf
+    assert delta < 2_000_000_000_000

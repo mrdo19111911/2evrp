@@ -1,4 +1,7 @@
-"""Tests for src/init/giant_tour.py — giant tour construction."""
+"""Tests for src/init/giant_tour.py -- giant tour construction.
+
+All units: meters (i64), seconds (i64), grams (i64).
+"""
 import numpy as np
 import pytest
 
@@ -6,6 +9,7 @@ from src.init.giant_tour import (
     build_giant_tour,
     find_cluster_satellite,
     cw_savings_order,
+    build_bike_giant_tour,
 )
 from src.data.constants import COL_DEMAND
 
@@ -13,29 +17,28 @@ from src.data.constants import COL_DEMAND
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
-def _make_cluster(members, big_nodes, bike_nodes, customers,
-                  restricted=None):
+def _make_cluster(members, big_nodes, bike_nodes, customers):
     """Build a cluster dict from member lists."""
     members_arr = np.array(members, dtype=np.int32)
     big_arr = np.array(big_nodes, dtype=np.int32)
     bike_arr = np.array(bike_nodes, dtype=np.int32)
-    rest_arr = np.array(restricted if restricted else [], dtype=np.int32)
-    coords = customers[members_arr, :2]
+    rest_arr = np.array([], dtype=np.int32)
+    coords = customers[members_arr, :2].astype(np.float64)
     return {
         "members": members_arr,
         "big_nodes": big_arr,
         "bike_nodes": bike_arr,
         "restricted": rest_arr,
-        "total_demand": float(customers[members_arr, COL_DEMAND].sum()),
+        "total_demand": int(customers[members_arr, COL_DEMAND].sum()),
         "centroid": coords.mean(axis=0),
     }
 
 
 def _simple_dist_matrix(coords_with_depot):
-    """Euclidean distance matrix from (N+1, 2) coords (index 0 = depot)."""
-    n = len(coords_with_depot)
-    diff = coords_with_depot[:, None, :] - coords_with_depot[None, :, :]
-    return np.sqrt((diff ** 2).sum(axis=2))
+    """Euclidean i64 distance matrix from (N+1, 2) coords (index 0 = depot)."""
+    coords_f = coords_with_depot.astype(np.float64)
+    diff = coords_f[:, None, :] - coords_f[None, :, :]
+    return np.round(np.sqrt((diff ** 2).sum(axis=2))).astype(np.int64)
 
 
 # ---------------------------------------------------------------------------
@@ -43,33 +46,25 @@ def _simple_dist_matrix(coords_with_depot):
 # ---------------------------------------------------------------------------
 class TestFindClusterSatellite:
     def test_returns_closest_to_centroid(self):
-        """Cluster with 3 nodes -> returns node closest to centroid."""
-        # Nodes at (0,0), (1,0), (10,0). Centroid ~ (3.67, 0).
-        # Node 1 at (1,0) is closest to centroid.
         customers = np.array([
-            [0.0, 0.0, 20.0, 0.0, 120.0, 5.0],  # 0
-            [1.0, 0.0, 20.0, 0.0, 120.0, 5.0],  # 1
-            [10.0, 0.0, 20.0, 0.0, 120.0, 5.0],  # 2
-        ], dtype=np.float64)
-        # dist_matrix: depot at origin, then 3 customers
-        depot = np.array([5.0, 5.0])
-        coords = np.vstack([depot, customers[:, :2]])
+            [0, 0, 20000, 0, 7200, 300, 0],
+            [1000, 0, 20000, 0, 7200, 300, 0],
+            [10000, 0, 20000, 0, 7200, 300, 0],
+        ], dtype=np.int64)
+        depot = np.array([5000, 5000], dtype=np.int64)
+        coords = np.vstack([depot.reshape(1, 2), customers[:, :2]])
         dm = _simple_dist_matrix(coords)
-
         cluster = _make_cluster([0, 1, 2], [], [0, 1, 2], customers)
-        # centroid = (3.67, 0), closest is node 1 at (1,0)
         sat = find_cluster_satellite(cluster, customers, dm)
         assert sat == 1
 
     def test_single_node_cluster(self):
-        """Cluster with 1 bike node -> returns that node."""
         customers = np.array([
-            [3.0, 4.0, 15.0, 0.0, 120.0, 5.0],
-        ], dtype=np.float64)
-        depot = np.array([0.0, 0.0])
-        coords = np.vstack([depot, customers[:, :2]])
+            [3000, 4000, 15000, 0, 7200, 300, 0],
+        ], dtype=np.int64)
+        depot = np.array([0, 0], dtype=np.int64)
+        coords = np.vstack([depot.reshape(1, 2), customers[:, :2]])
         dm = _simple_dist_matrix(coords)
-
         cluster = _make_cluster([0], [], [0], customers)
         sat = find_cluster_satellite(cluster, customers, dm)
         assert sat == 0
@@ -80,52 +75,37 @@ class TestFindClusterSatellite:
 # ---------------------------------------------------------------------------
 class TestNearestNeighborOrder:
     def test_four_stops_ordered(self):
-        """4 stops at known positions -> NN from depot produces predictable order.
-
-        Depot at (0,0). Stops at:
-          node 0: (1, 0) -> dist from depot = 1
-          node 1: (5, 0) -> dist from depot = 5
-          node 2: (2, 0) -> dist from depot = 2
-          node 3: (3, 0) -> dist from depot = 3
-
-        NN order from depot: 0 (d=1) -> 2 (d=1) -> 3 (d=1) -> 1 (d=2)
-        """
         customers_coords = np.array([
-            [1.0, 0.0], [5.0, 0.0], [2.0, 0.0], [3.0, 0.0],
-        ])
-        depot = np.array([0.0, 0.0])
-        coords = np.vstack([depot, customers_coords])
+            [1000, 0], [5000, 0], [2000, 0], [3000, 0],
+        ], dtype=np.int64)
+        depot = np.array([0, 0], dtype=np.int64)
+        coords = np.vstack([depot.reshape(1, 2), customers_coords])
         dm = _simple_dist_matrix(coords)
-
         stops = [
-            {"node": 0, "type": "deliver", "demand": 10.0, "cluster_idx": -1},
-            {"node": 1, "type": "deliver", "demand": 10.0, "cluster_idx": -1},
-            {"node": 2, "type": "satellite", "demand": 20.0, "cluster_idx": 0},
-            {"node": 3, "type": "deliver", "demand": 10.0, "cluster_idx": -1},
+            {"node": 0, "type": "deliver", "demand": 10000, "cluster_idx": -1},
+            {"node": 1, "type": "deliver", "demand": 10000, "cluster_idx": -1},
+            {"node": 2, "type": "satellite", "demand": 20000, "cluster_idx": 0},
+            {"node": 3, "type": "deliver", "demand": 10000, "cluster_idx": -1},
         ]
-
         ordered = cw_savings_order(stops, dm)
         ordered_nodes = [s["node"] for s in ordered]
         assert set(ordered_nodes) == {0, 1, 2, 3}
         assert len(ordered_nodes) == 4
 
     def test_preserves_stop_metadata(self):
-        """Ordering must keep stop dict contents intact."""
-        customers_coords = np.array([[1.0, 0.0], [2.0, 0.0]])
-        depot = np.array([0.0, 0.0])
-        coords = np.vstack([depot, customers_coords])
+        customers_coords = np.array([[1000, 0], [2000, 0]], dtype=np.int64)
+        depot = np.array([0, 0], dtype=np.int64)
+        coords = np.vstack([depot.reshape(1, 2), customers_coords])
         dm = _simple_dist_matrix(coords)
-
         stops = [
-            {"node": 1, "type": "satellite", "demand": 50.0, "cluster_idx": 3},
-            {"node": 0, "type": "deliver", "demand": 100.0, "cluster_idx": -1},
+            {"node": 1, "type": "satellite", "demand": 50000, "cluster_idx": 3},
+            {"node": 0, "type": "deliver", "demand": 100000, "cluster_idx": -1},
         ]
         ordered = cw_savings_order(stops, dm)
         assert len(ordered) == 2
-        # Metadata preserved regardless of order
         nodes_map = {s["node"]: s for s in ordered}
         assert nodes_map[0]["type"] == "deliver"
-        assert nodes_map[0]["demand"] == pytest.approx(100.0)
+        assert nodes_map[0]["demand"] == 100000
         assert nodes_map[1]["type"] == "satellite"
         assert nodes_map[1]["cluster_idx"] == 3
 
@@ -135,67 +115,198 @@ class TestNearestNeighborOrder:
 # ---------------------------------------------------------------------------
 class TestBuildGiantTour:
     def test_cluster_with_big_and_bike_nodes(self):
-        """2 clusters: cluster0 has 1 big + 2 bike, cluster1 has 1 bike only.
-
-        Expected: big node as 'deliver', each cluster with bike_nodes gets a 'satellite'.
-        """
         customers = np.array([
-            [0.0, 0.0, 100.0, 0.0, 120.0, 5.0],   # 0: big
-            [1.0, 0.0,  20.0, 0.0, 120.0, 5.0],   # 1: bike
-            [2.0, 0.0,  15.0, 0.0, 120.0, 5.0],   # 2: bike
-            [10.0, 0.0, 10.0, 0.0, 120.0, 5.0],   # 3: bike (cluster1)
-        ], dtype=np.float64)
-        depot = np.array([5.0, 5.0])
-        coords = np.vstack([depot, customers[:, :2]])
+            [0, 0, 100000, 0, 7200, 300, 0],
+            [1000, 0, 20000, 0, 7200, 300, 0],
+            [2000, 0, 15000, 0, 7200, 300, 0],
+            [10000, 0, 10000, 0, 7200, 300, 0],
+        ], dtype=np.int64)
+        depot = np.array([5000, 5000], dtype=np.int64)
+        coords = np.vstack([depot.reshape(1, 2), customers[:, :2]])
         dm = _simple_dist_matrix(coords)
-
         cluster0 = _make_cluster([0, 1, 2], [0], [1, 2], customers)
         cluster1 = _make_cluster([3], [], [3], customers)
-
         tour = build_giant_tour([cluster0, cluster1], customers, depot, dm)
-
         types = [s["type"] for s in tour]
-        nodes = [s["node"] for s in tour]
-
-        # Must have at least 1 deliver (big node 0) and 2 satellites
         assert "deliver" in types
-        assert types.count("satellite") == 2  # one per cluster with bike_nodes
-
-        # Big node 0 must appear as deliver
+        assert types.count("satellite") == 2
         deliver_nodes = [s["node"] for s in tour if s["type"] == "deliver"]
         assert 0 in deliver_nodes
 
     def test_cluster_only_big_nodes(self):
-        """Cluster with only big nodes -> only 'deliver' stops, no satellite."""
         customers = np.array([
-            [0.0, 0.0, 100.0, 0.0, 120.0, 5.0],  # big
-            [5.0, 0.0, 200.0, 0.0, 120.0, 5.0],  # big
-        ], dtype=np.float64)
-        depot = np.array([0.0, 0.0])
-        coords = np.vstack([depot, customers[:, :2]])
+            [0, 0, 100000, 0, 7200, 300, 0],
+            [5000, 0, 200000, 0, 7200, 300, 0],
+        ], dtype=np.int64)
+        depot = np.array([0, 0], dtype=np.int64)
+        coords = np.vstack([depot.reshape(1, 2), customers[:, :2]])
         dm = _simple_dist_matrix(coords)
-
         cluster = _make_cluster([0, 1], [0, 1], [], customers)
         tour = build_giant_tour([cluster], customers, depot, dm)
-
         types = [s["type"] for s in tour]
         assert all(t == "deliver" for t in types)
         assert len(tour) == 2
 
     def test_tour_stop_dict_structure(self):
-        """Each stop dict has node, type, demand, cluster_idx keys."""
         customers = np.array([
-            [0.0, 0.0, 50.0, 0.0, 120.0, 5.0],
-        ], dtype=np.float64)
-        depot = np.array([5.0, 5.0])
-        coords = np.vstack([depot, customers[:, :2]])
+            [0, 0, 50000, 0, 7200, 300, 0],
+        ], dtype=np.int64)
+        depot = np.array([5000, 5000], dtype=np.int64)
+        coords = np.vstack([depot.reshape(1, 2), customers[:, :2]])
         dm = _simple_dist_matrix(coords)
-
         cluster = _make_cluster([0], [], [0], customers)
         tour = build_giant_tour([cluster], customers, depot, dm)
-
         for stop in tour:
             assert "node" in stop
             assert "type" in stop
             assert "demand" in stop
             assert "cluster_idx" in stop
+
+
+# ---------------------------------------------------------------------------
+# build_bike_giant_tour
+# ---------------------------------------------------------------------------
+class TestBuildBikeGiantTour:
+
+    def test_empty_truck_gt_empty_bike_customers(self):
+        customers = np.zeros((0, 7), dtype=np.int64)
+        dm = np.zeros((1, 1), dtype=np.int64)
+        result = build_bike_giant_tour([], [], customers, dm)
+        assert result == []
+
+    def test_single_reload_zero_bike_customers(self):
+        customers = np.array([
+            [0, 0, 100000, 0, 7200, 300, 0],
+        ], dtype=np.int64)
+        depot = np.array([0, 0], dtype=np.int64)
+        coords = np.vstack([depot.reshape(1, 2), customers[:, :2]])
+        dm = _simple_dist_matrix(coords)
+        truck_gt = [
+            {"node": 0, "type": "deliver", "demand": 100000, "cluster_idx": -1}
+        ]
+        result = build_bike_giant_tour(truck_gt, [], customers, dm)
+        assert len(result) == 1
+        assert result[0]["node"] == 0
+        assert result[0]["type"] == "reload"
+        assert result[0]["demand"] == 0
+
+    def test_cheapest_insertion_all_same_location(self):
+        customers = np.array([
+            [1000, 0, 10000, 0, 7200, 300, 0],
+            [1000, 0, 20000, 0, 7200, 300, 0],
+            [1000, 0, 15000, 0, 7200, 300, 0],
+        ], dtype=np.int64)
+        depot = np.array([0, 0], dtype=np.int64)
+        coords = np.vstack([depot.reshape(1, 2), customers[:, :2]])
+        dm = _simple_dist_matrix(coords)
+        truck_gt = [
+            {"node": 0, "type": "deliver", "demand": 100000, "cluster_idx": -1}
+        ]
+        result = build_bike_giant_tour(truck_gt, [1, 2], customers, dm)
+        nodes = [s["node"] for s in result]
+        assert set(nodes) == {0, 1, 2}
+        assert result[0]["type"] == "reload"
+
+    def test_bike_customer_demands_preserved(self):
+        customers = np.array([
+            [0, 0, 100000, 0, 7200, 300, 0],
+            [5000, 0, 23000, 0, 7200, 300, 0],
+            [10000, 0, 44000, 0, 7200, 300, 0],
+        ], dtype=np.int64)
+        depot = np.array([0, 0], dtype=np.int64)
+        coords = np.vstack([depot.reshape(1, 2), customers[:, :2]])
+        dm = _simple_dist_matrix(coords)
+        truck_gt = [
+            {"node": 0, "type": "deliver", "demand": 100000, "cluster_idx": -1}
+        ]
+        result = build_bike_giant_tour(truck_gt, [1, 2], customers, dm)
+        bikes = [s for s in result if s["node"] in [1, 2]]
+        for b in bikes:
+            assert b["demand"] == int(customers[b["node"], COL_DEMAND])
+
+    def test_empty_truck_gt_with_bike_customers(self):
+        customers = np.array([
+            [5000, 0, 15000, 0, 7200, 300, 0],
+            [10000, 0, 20000, 0, 7200, 300, 0],
+        ], dtype=np.int64)
+        depot = np.array([0, 0], dtype=np.int64)
+        coords = np.vstack([depot.reshape(1, 2), customers[:, :2]])
+        dm = _simple_dist_matrix(coords)
+        result = build_bike_giant_tour([], [0, 1], customers, dm)
+        assert len(result) == 2
+        assert all(s["type"] == "deliver" for s in result)
+        nodes = [s["node"] for s in result]
+        assert set(nodes) == {0, 1}
+
+
+# ---------------------------------------------------------------------------
+# cw_savings_order edge cases
+# ---------------------------------------------------------------------------
+class TestCWSavingsOrderEdgeCases:
+
+    def test_single_node(self):
+        customers_coords = np.array([[5000, 0]], dtype=np.int64)
+        depot = np.array([0, 0], dtype=np.int64)
+        coords = np.vstack([depot.reshape(1, 2), customers_coords])
+        dm = _simple_dist_matrix(coords)
+        stops = [
+            {"node": 0, "type": "deliver", "demand": 50000, "cluster_idx": -1}
+        ]
+        result = cw_savings_order(stops, dm)
+        assert len(result) == 1
+        assert result[0]["node"] == 0
+
+    def test_two_nodes(self):
+        customers_coords = np.array([[1000, 0], [5000, 0]], dtype=np.int64)
+        depot = np.array([0, 0], dtype=np.int64)
+        coords = np.vstack([depot.reshape(1, 2), customers_coords])
+        dm = _simple_dist_matrix(coords)
+        stops = [
+            {"node": 0, "type": "deliver", "demand": 10000, "cluster_idx": -1},
+            {"node": 1, "type": "deliver", "demand": 20000, "cluster_idx": -1},
+        ]
+        result = cw_savings_order(stops, dm)
+        assert len(result) == 2
+        nodes = [s["node"] for s in result]
+        assert set(nodes) == {0, 1}
+
+    def test_empty_stops(self):
+        dm = np.zeros((1, 1), dtype=np.int64)
+        result = cw_savings_order([], dm)
+        assert result == []
+
+
+# ---------------------------------------------------------------------------
+# find_cluster_satellite edge cases
+# ---------------------------------------------------------------------------
+class TestFindClusterSatelliteEdgeCase:
+
+    def test_single_member_cluster(self):
+        customers = np.array([
+            [7000, 3000, 50000, 0, 7200, 300, 0],
+        ], dtype=np.int64)
+        depot = np.array([0, 0], dtype=np.int64)
+        coords = np.vstack([depot.reshape(1, 2), customers[:, :2]])
+        dm = _simple_dist_matrix(coords)
+        cluster_dict = {
+            "members": np.array([0], dtype=np.int32),
+            "centroid": customers[0, :2].astype(np.float64),
+        }
+        sat = find_cluster_satellite(cluster_dict, customers, dm)
+        assert sat == 0
+
+    def test_two_equidistant_nodes(self):
+        customers = np.array([
+            [1000, 0, 10000, 0, 7200, 300, 0],
+            [-1000, 0, 20000, 0, 7200, 300, 0],
+        ], dtype=np.int64)
+        depot = np.array([0, 0], dtype=np.int64)
+        coords = np.vstack([depot.reshape(1, 2), customers[:, :2]])
+        dm = _simple_dist_matrix(coords)
+        centroid = np.array([0.0, 0.0])
+        cluster_dict = {
+            "members": np.array([0, 1], dtype=np.int32),
+            "centroid": centroid,
+        }
+        sat = find_cluster_satellite(cluster_dict, customers, dm)
+        assert sat in {0, 1}

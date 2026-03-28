@@ -1,89 +1,101 @@
-"""Helper utilities for local search operators."""
+"""LS helpers. @njit, i64 distances/loads, delta returns i64."""
 import numpy as np
+from numba import njit
+from src.data.constants import (
+    ACT_DELIVER, VEH_TRUCK, VEH_BIKE,
+    SOL_TRUCK_STOPS, SOL_TRUCK_ACTIONS, SOL_BIKE_STOPS, SOL_BIKE_ACTIONS,
+    SOL_TRUCK_LENGTHS, SOL_BIKE_LENGTHS,
+    SOL_TRUCK_LOADS, SOL_BIKE_LOADS,
+    SOL_TRUCK_DISTANCES, SOL_BIKE_DISTANCES,
+    SOL_CUST_VEHICLE, SOL_CUST_VTYPE, SOL_CUST_ROUTE_POS,
+    SOL_META, META_N_TRUCKS, META_MAX_ROUTE_LEN,
+)
 
-from src.data.constants import ACT_DELIVER, VEH_TRUCK, VEH_BIKE
+@njit(cache=True)
+def get_stops(sol, vtype):
+    return sol[SOL_TRUCK_STOPS] if vtype == VEH_TRUCK else sol[SOL_BIKE_STOPS]
 
+@njit(cache=True)
+def get_actions(sol, vtype):
+    return sol[SOL_TRUCK_ACTIONS] if vtype == VEH_TRUCK else sol[SOL_BIKE_ACTIONS]
 
-def _get_route_arrays(sol, vtype):
-    if vtype == VEH_TRUCK:
-        return sol["truck_stops"], sol["truck_actions"]
-    return sol["bike_stops"], sol["bike_actions"]
+@njit(cache=True)
+def get_lengths(sol, vtype):
+    return sol[SOL_TRUCK_LENGTHS] if vtype == VEH_TRUCK else sol[SOL_BIKE_LENGTHS]
 
+@njit(cache=True)
+def get_loads(sol, vtype):
+    return sol[SOL_TRUCK_LOADS] if vtype == VEH_TRUCK else sol[SOL_BIKE_LOADS]
 
-def _get_lengths(sol, vtype):
-    return sol["truck_lengths"] if vtype == VEH_TRUCK else sol["bike_lengths"]
+@njit(cache=True)
+def get_distances(sol, vtype):
+    return sol[SOL_TRUCK_DISTANCES] if vtype == VEH_TRUCK else sol[SOL_BIKE_DISTANCES]
 
-
-def _get_stops(sol, vtype):
-    return sol["truck_stops"] if vtype == VEH_TRUCK else sol["bike_stops"]
-
-
-def _get_actions(sol, vtype):
-    return sol["truck_actions"] if vtype == VEH_TRUCK else sol["bike_actions"]
-
-
-def _get_loads(sol, vtype):
-    return sol["truck_loads"] if vtype == VEH_TRUCK else sol["bike_loads"]
-
-
-def _two_opt_delta(sol, vtype, vid, i, j, dist_matrix):
-    """O(1) delta distance if reversing segment [i,j]."""
-    stops, _ = _get_route_arrays(sol, vtype)
-    L = int(_get_lengths(sol, vtype)[vid])
-
-    # Depot is index 0 in dist_matrix, customers are +1
-    a = int(stops[vid, i]) + 1
-    b = int(stops[vid, j]) + 1
-    a_prev = int(stops[vid, i - 1]) + 1 if i > 0 else 0  # depot
-    b_next = int(stops[vid, j + 1]) + 1 if j < L - 1 else 0  # depot
-
-    old_cost = dist_matrix[a_prev, a] + dist_matrix[b, b_next]
-    new_cost = dist_matrix[a_prev, b] + dist_matrix[a, b_next]
-    return new_cost - old_cost
+@njit(cache=True)
+def n_vehicles(sol, vtype):
+    return sol[SOL_META][META_N_TRUCKS] if vtype == VEH_TRUCK else sol[SOL_META][1]
 
 
-def _or_opt_delta(sol, vtype, vid, seg_start, seg_len, insert_pos, dist_matrix):
-    """O(1) delta for moving segment [seg_start..seg_start+seg_len-1]."""
-    stops, _ = _get_route_arrays(sol, vtype)
-    L = int(_get_lengths(sol, vtype)[vid])
+@njit(cache=True)
+def two_opt_delta(sol, vtype, vid, i, j, dist_matrix):
+    """O(1) delta distance (i64 meters) if reversing segment [i,j]."""
+    stops = get_stops(sol, vtype)
+    L = get_lengths(sol, vtype)[vid]
+    a = stops[vid, i] + 1
+    b = stops[vid, j] + 1
+    a_prev = stops[vid, i - 1] + 1 if i > 0 else 0
+    b_next = stops[vid, j + 1] + 1 if j < L - 1 else 0
+    return (dist_matrix[a_prev, b] + dist_matrix[a, b_next]
+            - dist_matrix[a_prev, a] - dist_matrix[b, b_next])
+
+
+@njit(cache=True)
+def or_opt_delta(sol, vtype, vid, seg_start, seg_len, insert_pos, dist_matrix):
+    """O(1) delta (i64 meters) for moving segment."""
+    stops = get_stops(sol, vtype)
+    L = get_lengths(sol, vtype)[vid]
     seg_end = seg_start + seg_len - 1
 
-    def dm_node(pos):
-        """Map position to dist_matrix index. -1 means depot (index 0)."""
-        if pos < 0 or pos >= L:
-            return 0
-        return int(stops[vid, pos]) + 1
+    prev_seg = 0 if seg_start == 0 else stops[vid, seg_start - 1] + 1
+    first_seg = stops[vid, seg_start] + 1
+    last_seg = stops[vid, seg_end] + 1
+    next_seg = 0 if seg_end >= L - 1 else stops[vid, seg_end + 1] + 1
 
-    prev_seg = dm_node(seg_start - 1)
-    first_seg = dm_node(seg_start)
-    last_seg = dm_node(seg_end)
-    next_seg = dm_node(seg_end + 1)
-
-    # Cost of removing segment
     remove_cost = (dist_matrix[prev_seg, next_seg]
                    - dist_matrix[prev_seg, first_seg]
                    - dist_matrix[last_seg, next_seg])
 
-    # Adjusted insert position after removal
-    if insert_pos > seg_end:
-        adj_pos = insert_pos - seg_len
-    else:
-        adj_pos = insert_pos
+    adj_pos = insert_pos - seg_len if insert_pos > seg_end else insert_pos
+    n_remaining = L - seg_len
 
-    # Build route without segment to find insert neighbors
-    route_nodes = []
-    for idx in range(L):
-        if idx < seg_start or idx > seg_end:
-            route_nodes.append(dm_node(idx))
-
-    if len(route_nodes) == 0:
-        ins_prev, ins_next = 0, 0  # depot
+    if n_remaining == 0:
+        ins_prev = ins_next = 0
     elif adj_pos == 0:
-        ins_prev, ins_next = 0, route_nodes[0]  # depot -> first
-    elif adj_pos >= len(route_nodes):
-        ins_prev, ins_next = route_nodes[-1], 0  # last -> depot
+        ins_prev = 0
+        for idx in range(L):
+            if idx < seg_start or idx > seg_end:
+                ins_next = stops[vid, idx] + 1
+                break
+        else:
+            ins_next = 0
+    elif adj_pos >= n_remaining:
+        ins_next = 0
+        for idx in range(L - 1, -1, -1):
+            if idx < seg_start or idx > seg_end:
+                ins_prev = stops[vid, idx] + 1
+                break
     else:
-        ins_prev, ins_next = route_nodes[adj_pos - 1], route_nodes[adj_pos]
+        k = 0
+        ins_prev = 0
+        ins_next = 0
+        for idx in range(L):
+            if idx < seg_start or idx > seg_end:
+                if k == adj_pos - 1:
+                    ins_prev = stops[vid, idx] + 1
+                if k == adj_pos:
+                    ins_next = stops[vid, idx] + 1
+                    break
+                k += 1
 
     insert_cost = (dist_matrix[ins_prev, first_seg]
                    + dist_matrix[last_seg, ins_next]
@@ -91,63 +103,94 @@ def _or_opt_delta(sol, vtype, vid, seg_start, seg_len, insert_pos, dist_matrix):
     return remove_cost + insert_cost
 
 
-def _do_or_opt_move(sol, vtype, vid, seg_start, seg_len, insert_pos,
-                    dist_matrix):
+@njit(cache=True)
+def do_or_opt_move(sol, vtype, vid, seg_start, seg_len, insert_pos, dist_matrix):
     """Execute or-opt move by rebuilding route."""
-    stops, actions = _get_route_arrays(sol, vtype)
-    L = int(_get_lengths(sol, vtype)[vid])
+    stops = get_stops(sol, vtype)
+    actions = get_actions(sol, vtype)
+    L = get_lengths(sol, vtype)[vid]
+    cust_route_pos = sol[SOL_CUST_ROUTE_POS]
 
-    # Build loc->customer map BEFORE rearranging
-    global_vid = vid if vtype == VEH_TRUCK else sol["n_trucks"] + vid
-    custs_on_v = np.where(sol["cust_vehicle"] == global_vid)[0]
-    loc_to_cust_map = {}
-    for c in custs_on_v:
-        old_pos = sol["cust_route_pos"][c]
-        if 0 <= old_pos < L:
-            loc_to_cust_map[int(stops[vid, old_pos])] = int(c)
+    tmp_s = np.empty(seg_len, dtype=np.int32)
+    tmp_a = np.empty(seg_len, dtype=np.int8)
+    for k in range(seg_len):
+        tmp_s[k] = stops[vid, seg_start + k]
+        tmp_a[k] = actions[vid, seg_start + k]
 
-    seg_stops = stops[vid, seg_start:seg_start + seg_len].copy()
-    seg_actions = actions[vid, seg_start:seg_start + seg_len].copy()
-
-    new_stops, new_actions = [], []
+    buf_s = np.empty(L, dtype=np.int32)
+    buf_a = np.empty(L, dtype=np.int8)
+    n = 0
     for idx in range(L):
         if idx < seg_start or idx >= seg_start + seg_len:
-            new_stops.append(stops[vid, idx])
-            new_actions.append(actions[vid, idx])
+            buf_s[n] = stops[vid, idx]
+            buf_a[n] = actions[vid, idx]
+            n += 1
 
-    adj_pos = insert_pos if insert_pos <= seg_start else insert_pos - seg_len
+    adj = insert_pos if insert_pos <= seg_start else insert_pos - seg_len
+    for idx in range(n - 1, adj - 1, -1):
+        buf_s[idx + seg_len] = buf_s[idx]
+        buf_a[idx + seg_len] = buf_a[idx]
     for k in range(seg_len):
-        new_stops.insert(adj_pos + k, seg_stops[k])
-        new_actions.insert(adj_pos + k, seg_actions[k])
+        buf_s[adj + k] = tmp_s[k]
+        buf_a[adj + k] = tmp_a[k]
 
     for idx in range(L):
-        stops[vid, idx] = new_stops[idx]
-        actions[vid, idx] = new_actions[idx]
+        stops[vid, idx] = buf_s[idx]
+        actions[vid, idx] = buf_a[idx]
 
-    # Rebuild cust_route_pos from loc->customer map
     for idx in range(L):
         if actions[vid, idx] == ACT_DELIVER:
-            loc = int(stops[vid, idx])
-            c = loc_to_cust_map.get(loc, -1)
-            if c >= 0:
-                sol["cust_route_pos"][c] = idx
+            cust_route_pos[stops[vid, idx]] = idx
 
-    # Update distance cache
-    _update_route_distance(sol, vtype, vid, dist_matrix)
+    update_route_distance(sol, vtype, vid, dist_matrix)
 
 
-def _update_route_distance(sol, vtype, vid, dist_matrix):
-    """Recompute route distance from scratch."""
-    stops, _ = _get_route_arrays(sol, vtype)
-    L = int(_get_lengths(sol, vtype)[vid])
-    distances = sol["truck_distances"] if vtype == VEH_TRUCK else sol["bike_distances"]
-
+@njit(cache=True)
+def update_route_distance(sol, vtype, vid, dist_matrix):
+    """Recompute route distance (i64 meters) from scratch."""
+    stops = get_stops(sol, vtype)
+    L = get_lengths(sol, vtype)[vid]
+    dists = get_distances(sol, vtype)
     if L == 0:
-        distances[vid] = 0.0
+        dists[vid] = 0
         return
-
-    total = dist_matrix[0, int(stops[vid, 0]) + 1]
+    total = dist_matrix[0, stops[vid, 0] + 1]
     for i in range(1, L):
-        total += dist_matrix[int(stops[vid, i - 1]) + 1, int(stops[vid, i]) + 1]
-    total += dist_matrix[int(stops[vid, L - 1]) + 1, 0]
-    distances[vid] = total
+        total += dist_matrix[stops[vid, i - 1] + 1, stops[vid, i] + 1]
+    total += dist_matrix[stops[vid, L - 1] + 1, 0]
+    dists[vid] = total
+
+
+@njit(cache=True)
+def clear_tail_index(sol, vtype, vid, start, end):
+    """Clear cust index for DELIVER stops in [start..end)."""
+    stops = get_stops(sol, vtype)
+    actions = get_actions(sol, vtype)
+    cv = sol[SOL_CUST_VEHICLE]
+    ct = sol[SOL_CUST_VTYPE]
+    cp = sol[SOL_CUST_ROUTE_POS]
+    for idx in range(start, end):
+        if actions[vid, idx] == ACT_DELIVER:
+            c = stops[vid, idx]
+            if c >= 0:
+                cv[c] = -1
+                ct[c] = -1
+                cp[c] = -1
+
+
+@njit(cache=True)
+def rebuild_route_index(sol, vtype, vid, L):
+    """Rebuild cust index for route."""
+    stops = get_stops(sol, vtype)
+    actions = get_actions(sol, vtype)
+    n_trucks = sol[SOL_META][META_N_TRUCKS]
+    gv = vid if vtype == VEH_TRUCK else n_trucks + vid
+    cv = sol[SOL_CUST_VEHICLE]
+    ct = sol[SOL_CUST_VTYPE]
+    cp = sol[SOL_CUST_ROUTE_POS]
+    for idx in range(L):
+        if actions[vid, idx] == ACT_DELIVER:
+            c = stops[vid, idx]
+            cv[c] = gv
+            ct[c] = vtype
+            cp[c] = idx
