@@ -1,0 +1,25 @@
+@import "tailwindcss";
+
+:root {
+  --bg-primary: #0f1117;
+  --bg-panel: #1a1d27;
+  --bg-input: #374151;
+  --text-primary: #e0e0e0;
+  --text-secondary: #9ca3af;
+  --text-dim: #6b7280;
+  --truck: #3b82f6;
+  --bike: #f97316;
+  --satellite: #a855f7;
+  --depot: #ef4444;
+  --ok: #10b981;
+  --warn: #f59e0b;
+  --error: #ef4444;
+  --fitness: #f59e0b;
+}
+
+body {
+  margin: 0;
+  background: var(--bg-primary);
+  color: var(--text-primary);
+  font-family: 'JetBrains Mono', 'Fira Code', monospace;
+}
